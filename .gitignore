@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/.local/
+/licenses/
+/completions/
+/.agsudo-dev/
+/coverage.out
+__pycache__/
+*.agsudo.bak

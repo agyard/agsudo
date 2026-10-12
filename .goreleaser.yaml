@@ -1,0 +1,52 @@
+version: 2
+project_name: agsudo
+
+before:
+  hooks:
+    - sh scripts/release-files.sh
+
+builds:
+  - id: agsudo
+    main: ./cmd/agsudo
+    binary: agsudo
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/thezzisu/agsudo/internal/cli.Version=v{{ .Version }}
+  - id: agsudo-helper
+    main: ./cmd/agsudo-helper
+    binary: agsudo-helper
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ['-s -w']
+
+archives:
+  - id: agsudo
+    ids: [agsudo, agsudo-helper]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - NOTICE
+      - docs/*.md
+      - integrations/README.md
+      - scripts/install.sh
+      - completions/*
+      - licenses/**/*
+      - licenses/Go-LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ .Version }}-dev"
+
+changelog:
+  disable: true
