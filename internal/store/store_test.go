@@ -92,6 +92,39 @@ func TestOneShotExecutionAndAudit(t *testing.T) {
 	}
 }
 
+func TestConcurrentFirstOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	start, results := make(chan struct{}), make(chan error, 16)
+	for range cap(results) {
+		go func() {
+			<-start
+			s, err := Open(path)
+			if err != nil {
+				results <- err
+				return
+			}
+			defer s.Close()
+			_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: time.Now().Add(time.Minute)})
+			results <- err
+		}()
+	}
+	close(start)
+	for range cap(results) {
+		if err := <-results; err != nil {
+			t.Error(err)
+		}
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p, err := s.Events(testContext, owner, "", "", 0, 200)
+	if err != nil || len(p.Events) != cap(results) {
+		t.Fatalf("lost requests during initialization: %d events, %v", len(p.Events), err)
+	}
+}
+
 func TestCancelCompetesWithExecutionAcrossConnections(t *testing.T) {
 	s, path := testStore(t)
 	other, err := Open(path)

@@ -175,9 +175,13 @@ class Integration(unittest.TestCase):
         self.addCleanup(cleanup)
         return p
 
-    def pending(self):
+    def pending(self, process=None):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
+            # Surface child startup errors instead of reporting a queue timeout.
+            if process is not None and process.poll() is not None:
+                stdout, stderr = process.communicate(timeout=3)
+                self.fail(f"process exited with {process.returncode}: {stdout}{stderr}")
             requests = self.data("review")["requests"]
             if requests:
                 return requests[-1]
@@ -186,7 +190,7 @@ class Integration(unittest.TestCase):
 
     def start_waiting(self, *args):
         p = self.process(*args)
-        return p, self.pending()["id"]
+        return p, self.pending(p)["id"]
 
     def test_interrupt_and_disconnect(self):
         for sig in (signal.SIGINT, signal.SIGKILL):
@@ -273,7 +277,7 @@ class Integration(unittest.TestCase):
                 # Execute what the host receives; the script itself contains
                 # sudo, so searching/replacing the top-level text would miss it.
                 p = self.process("-c", "PATH=/usr/bin:/bin\n" + command, executable="/bin/sh")
-                req = self.pending()
+                req = self.pending(p)
                 self.assertEqual(req["spec"]["session"], host + "-session")
                 self.approve(req)
                 stdout, stderr = p.communicate(timeout=10)

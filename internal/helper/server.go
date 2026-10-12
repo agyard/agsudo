@@ -79,7 +79,7 @@ func openStore(c Config) (*store.Store, error) {
 	if c.Dev {
 		owner = uint32(os.Getuid())
 	}
-	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm", "state.db-journal"} {
+	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm", "state.db-journal", "state.db.lock"} {
 		st, err := os.Lstat(filepath.Join(c.StateDir, name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue

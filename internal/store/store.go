@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thezzisu/agsudo/internal/api"
@@ -31,12 +33,23 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
+	// WAL conversion and schema creation cannot safely race another first
+	// connection. flock covers initialization only; SQLite owns normal locking.
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+	if _, err = db.Exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;"); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -49,8 +62,8 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, api.Err("schema_version", "database schema %d is newer than supported schema 1", version)
 	}
-	_, err = db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
-PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;
+	if version == 0 {
+		_, err = db.Exec(`PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS requests (
  id TEXT NOT NULL UNIQUE, owner_uid INTEGER NOT NULL, session TEXT NOT NULL,
  state TEXT NOT NULL, body BLOB NOT NULL
@@ -63,6 +76,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_owner ON events(owner_uid,sequence);
 CREATE INDEX IF NOT EXISTS events_session ON events(session,sequence);
 PRAGMA user_version=1;`)
+	}
 	if err != nil {
 		db.Close()
 		return nil, err
