@@ -293,7 +293,7 @@ func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	if err != nil || again.ID == r.ID {
 		t.Fatalf("new reason was dropped: %v", err)
 	}
-	if old, _ := s.Get(testContext, r.ID, owner); old.State != "canceled" || old.Failure != "replaced by "+again.ID {
+	if old, _ := s.Get(testContext, r.ID, owner); old.State != "canceled" || old.Failure != "replaced by "+again.ID || again.Prior.ID != r.ID {
 		t.Fatalf("replaced request still pending: %+v", old)
 	}
 	for _, reuseOnly := range []bool{false, true} {
@@ -333,8 +333,8 @@ func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	}
 	revised := denied.Spec
 	revised.Reason = "answering the reviewer"
-	if again, err = submit(revised, false); err != nil || again.ID == denied.ID {
-		t.Fatalf("denial blocked a revised request: %v", err)
+	if again, err = submit(revised, false); err != nil || again.ID == denied.ID || again.Prior.State != "denied" {
+		t.Fatalf("denial blocked or hid a revised request: %+v %v", again, err)
 	}
 	if _, err = s.Cancel(testContext, again.ID, owner, "test"); err != nil {
 		t.Fatal(err)

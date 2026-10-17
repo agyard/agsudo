@@ -76,7 +76,7 @@ func confirmApproval(cmd *cobra.Command, id string) (string, error) {
 	if err := client.New().Call(cmd.Context(), api.Input{Operation: "get", ID: id}, &r); err != nil {
 		return "", err
 	}
-	width, prompt := terminalWidth(cmd.OutOrStdout()), "Approve "+commandLabel(r)
+	width, prompt := terminalWidth(cmd.OutOrStdout()), "Approve "+approvalTitle(r)
 	if width > 0 {
 		prompt = elide(prompt, width-len(r.ID)-12)
 	}

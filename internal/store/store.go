@@ -202,7 +202,7 @@ func (s *Store) Create(ctx context.Context, r api.Request, reuseOnly bool) (api.
 		if err != nil {
 			return err
 		}
-		var replaced *api.Request
+		var replaced, denied *api.Request
 		explains := !reuseOnly && (r.Spec.Reason != "" || len(r.Spec.Context) > 0)
 		for _, old := range matches {
 			same := old.Digest == r.Digest || !explains
@@ -212,6 +212,8 @@ func (s *Store) Create(ctx context.Context, r api.Request, reuseOnly bool) (api.
 				return nil
 			case old.State == "pending":
 				replaced = &old
+			case old.State == "denied" && denied == nil:
+				denied = &old
 			}
 		}
 		if reuseOnly {
@@ -223,10 +225,14 @@ func (s *Store) Create(ctx context.Context, r api.Request, reuseOnly bool) (api.
 		}
 		if replaced != nil {
 			count--
+			r.Prior = &api.Prior{ID: replaced.ID, State: "replaced"}
 			replaced.State, replaced.Failure = "canceled", "replaced by "+r.ID
 			if err = s.save(ctx, tx, replaced, "request.canceled", r.OwnerUID); err != nil {
 				return err
 			}
+		}
+		if denied != nil {
+			r.Prior = &api.Prior{ID: denied.ID, State: "denied", Reason: denied.Decision.Reason}
 		}
 		if count >= 256 {
 			return api.Err("queue_full", "at most 256 unconsumed requests per user; cancel stale requests")

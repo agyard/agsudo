@@ -116,6 +116,18 @@ func elide(s string, width int) string {
 	return ansi.Truncate(s, head, "") + "…" + ansi.TruncateLeft(s, ansi.StringWidth(s)-(width-1-head), "")
 }
 func when(t time.Time) string { return t.Local().Format(time.DateTime + " MST") }
+
+// approvalTitle is what a person confirms: any reviewer suggestion, then the
+// command with its shell warning.
+func approvalTitle(r api.Request) string {
+	if d := r.Suggestion; d != nil && d.Recommend != "unknown" {
+		return "[suggested: " + d.Recommend + "] " + commandLabel(r)
+	}
+	return commandLabel(r)
+}
+
+// requestText puts what a decision rests on first: the command, its reason,
+// and earlier suggestions, decisions or requests for the same command.
 func requestText(r api.Request) string {
 	var b strings.Builder
 	field := func(label, value string) {
@@ -124,14 +136,36 @@ func requestText(r api.Request) string {
 		}
 	}
 	fmt.Fprintf(&b, "%s  %s\n", r.ID, r.State)
-	field("Requester", fmt.Sprintf("UID %d", r.OwnerUID))
 	field("Command", command(r))
 	if r.Spec.Scope == "shell_session" {
 		field("Scope", "shell; everything it runs, typed or piped in, is authorized without review")
 	}
+	field("Reason (caller supplied)", prose(r.Spec.Reason))
+	for _, d := range []*api.Decision{r.Suggestion, r.Decision} {
+		if d == nil {
+			continue
+		}
+		label, text := "Decision", d.Action
+		if d.Action == "defer" {
+			label, text = "Suggestion", d.Recommend+", deferred to a person"
+		}
+		text += fmt.Sprintf(" by UID %d", d.UID)
+		if d.Session != "" {
+			text += " in session " + d.Session
+		}
+		text += " at " + when(d.At)
+		if d.Reason != "" {
+			text += ": " + prose(d.Reason)
+		}
+		field(label, text)
+	}
+	if p := r.Prior; p != nil {
+		field("Follows", strings.TrimSuffix(p.ID+", "+p.State+": "+prose(p.Reason), ": "))
+	}
+	field("Target", fmt.Sprintf("%s (UID %d)", r.Spec.Target.Name, r.Spec.Target.UID))
 	field("Executable", r.Spec.Executable)
 	field("Directory", r.Spec.Cwd)
-	field("Target", fmt.Sprintf("%s (UID %d)", r.Spec.Target.Name, r.Spec.Target.UID))
+	field("Requester", fmt.Sprintf("UID %d", r.OwnerUID))
 	field("Session", r.Spec.Session)
 	field("Created", when(r.CreatedAt))
 	if left := time.Until(r.ExpiresAt).Round(time.Second); r.Unstarted() && left > 0 {
@@ -140,17 +174,6 @@ func requestText(r api.Request) string {
 		field("Expires", when(r.ExpiresAt)+" (expired)")
 	}
 	field("Digest", r.Digest)
-	field("Reason (caller supplied)", prose(r.Spec.Reason))
-	for _, d := range []*api.Decision{r.Suggestion, r.Decision} {
-		if d != nil {
-			fmt.Fprintf(&b, "\n%s by UID %d at %s\n", d.Action, d.UID, when(d.At))
-			field("From session", d.Session)
-			field("Reason", prose(d.Reason))
-			if d.Action == "defer" {
-				field("Recommendation", d.Recommend)
-			}
-		}
-	}
 	if r.ExitCode != nil {
 		field("Exit status", strconv.Itoa(*r.ExitCode))
 	}

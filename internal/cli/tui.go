@@ -332,7 +332,7 @@ func (m *reviewModel) View() tea.View {
 	if m.confirm != nil {
 		title := "DENY " + command(*m.confirm)
 		if m.action == "approve" {
-			title = "APPROVE " + commandLabel(*m.confirm)
+			title = "APPROVE " + approvalTitle(*m.confirm)
 		}
 		foot = accent.Render(elide(title, m.width-4)) + "\n" + m.reason.View()
 	}

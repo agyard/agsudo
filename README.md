@@ -83,8 +83,8 @@ agsudo exec --reason 'Verify privilege approval' -- id
 Select the request in the UI, press `a`, and press Enter to confirm. The waiting
 command runs as root. The UI also supports `d` to deny, `/` to filter, `h` for
 history, PgUp/PgDn to scroll details, and `q` to quit. You can inspect the
-requester, target, arguments, environment, context snapshots, and review
-suggestions before deciding.
+requester, target, arguments, context snapshots, review suggestions, and any
+earlier denial of the same command before deciding.
 
 ### Connect your agent
 

@@ -97,6 +97,14 @@ type Decision struct {
 	Reason    string    `json:"reason,omitempty"`
 	Recommend string    `json:"recommend,omitempty"`
 }
+
+// Prior is the earlier request for the same command that a request replaces
+// or answers, so reviewers see how that one ended.
+type Prior struct {
+	ID     string `json:"id"`
+	State  string `json:"state"` // denied, or replaced
+	Reason string `json:"reason,omitempty"`
+}
 type Request struct {
 	ID         string    `json:"id"`
 	OwnerUID   int       `json:"owner_uid"`
@@ -112,6 +120,7 @@ type Request struct {
 	Suggestion *Decision `json:"suggestion,omitempty"`
 	ExitCode   *int      `json:"exit_code,omitempty"`
 	Failure    string    `json:"failure,omitempty"`
+	Prior      *Prior    `json:"prior,omitempty"`
 }
 
 func (r Request) Waiting() bool   { return r.State == "pending" || r.State == "needs_human" }
