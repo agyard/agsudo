@@ -13,7 +13,7 @@ an approval workflow, then runs each approved request at most once.
 
 - **Familiar execution:** a `sudo` PATH shim preserves command streams, terminal
   interaction, signals, and exit status.
-- **Human or agent review:** use a terminal UI or a versioned JSON CLI. No built-in
+- **Human or agent review:** use a terminal UI or a JSON CLI. No built-in
   model, model credentials, or agent loop is required.
 - **Asynchronous requests:** submit, inspect, approve, defer, or cancel requests
   while the requesting agent continues other work.
@@ -63,8 +63,8 @@ review access to your ordinary account. It installs the CLI at
 `/etc/agsudo/config.json`; state lives in `/var/lib/agsudo`.
 
 To upgrade, unpack a new release and run its installer again. Upgrade both
-binaries together; existing configuration and state are preserved. The installer
-does not modify sudoers.
+binaries together; the installer keeps the configuration and state directory.
+It does not modify sudoers.
 
 ### Try an approval
 

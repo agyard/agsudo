@@ -97,7 +97,7 @@ func submit(ctx context.Context, e executionFlags, args []string, sudo bool) err
 	return client.New().Exec(r.ID, sudo)
 }
 
-func newExecute(o *options, detached bool) *cobra.Command {
+func newExecute(o *options, submitOnly bool) *cobra.Command {
 	var e executionFlags
 	cmd := &cobra.Command{Use: "exec [OPTIONS] -- COMMAND [ARGUMENTS...]", Short: "Wait for approval, then run a command once", Long: requesterHelp,
 		Example: "  agsudo exec --reason 'install build dependencies' -- dnf install -y openssl-devel\n  agsudo exec -u postgres -- psql\n  agsudo exec -s",
@@ -108,7 +108,7 @@ func newExecute(o *options, detached bool) *cobra.Command {
 			return submit(cmd.Context(), e, args, false)
 		},
 	}
-	if detached {
+	if submitOnly {
 		cmd.Use, cmd.Short = "request [OPTIONS] -- COMMAND [ARGUMENTS...]", "Submit a request without waiting; prints its ID"
 		cmd.Long = cmd.Short + ". Once it is approved, run the same command with sudo or agsudo exec;\nsee agsudo exec --help."
 		cmd.Example = "  ID=$(agsudo request --reason 'restart the app' -- systemctl restart app.service)"

@@ -346,7 +346,7 @@ func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	}
 }
 
-func TestNewerSchemaRejected(t *testing.T) {
+func TestUnknownSchemaIsDamaged(t *testing.T) {
 	s, path := testStore(t)
 	if _, err := s.db.Exec("PRAGMA user_version=99"); err != nil {
 		t.Fatal(err)
@@ -354,9 +354,9 @@ func TestNewerSchemaRejected(t *testing.T) {
 	other, err := Open(path)
 	if err == nil {
 		other.Close()
-		t.Fatal("opened and downgraded a future schema")
+		t.Fatal("opened and rewrote an unknown schema")
 	}
-	code(t, err, "schema_version")
+	code(t, err, "damaged_state")
 	var version int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 99 {
 		t.Fatalf("schema changed: %d %v", version, err)

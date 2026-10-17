@@ -74,7 +74,7 @@ CREATE INDEX events_session ON events(session,sequence);
 CREATE INDEX events_request ON events(request_id,sequence);
 PRAGMA user_version=2;`)
 	} else if err == nil && version != schema {
-		err = api.Err("schema_version", "%s has database schema %d, not %d; move it aside to start a new one", path, version, schema)
+		err = api.Err("damaged_state", "state database %s is damaged; delete it", path)
 	}
 	if err != nil {
 		db.Close()
