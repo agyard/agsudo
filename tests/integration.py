@@ -139,7 +139,7 @@ class Integration(unittest.TestCase):
         script.write_text("#!/bin/sh\nprintf original\n")
         script.chmod(0o700)
         context = Path(self.temp.name) / "notes.txt"
-        context.write_text("安装构建依赖\n")
+        context.write_text("Install build dependencies \u2014 within the approved scope\n")
         req = self.request(str(script), options=("--context", str(context)))
         self.assertEqual(req["spec"]["context"][0]["content"], context.read_text())
         self.approve(req)

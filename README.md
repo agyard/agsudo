@@ -1,147 +1,262 @@
 # AG-sudo
 
-AG-sudo 为 Linux 上的 Agent 工作流提供提权审批。Agent 保留普通用户权限；调用 `sudo` 时，由人或独立的审批 Agent 决定是否放行。
+[![CI](https://github.com/agyard/agsudo/actions/workflows/ci.yml/badge.svg)](https://github.com/agyard/agsudo/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/agyard/agsudo)](https://github.com/agyard/agsudo/releases/latest)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux-blue)](#requirements)
 
-没有常驻服务，也没有内置模型：普通权限 CLI 通过按需运行的 setuid helper 管理请求、切换身份和执行命令，SQLite 保存状态与审计事件。命令行使用 Cobra，审批 TUI 使用 Bubble Tea、Bubbles 和 Lip Gloss。
+**Privilege approval for agent workflows on Linux.**
 
-## 安装
+Let agents work with ordinary user permissions while a person or a separate
+reviewing agent approves privilege requests. AG-sudo routes `sudo` calls through
+an approval workflow, then runs each approved request at most once.
 
-从 [GitHub Releases](https://github.com/agyard/agsudo/releases) 下载 Linux `amd64` 或 `arm64` 压缩包及 `checksums.txt`，校验并解压。压缩包内包含两个可执行文件和安装脚本，不需要 Go。
+- **Familiar execution:** a `sudo` PATH shim preserves command streams, terminal
+  interaction, signals, and exit status.
+- **Human or agent review:** use a terminal UI or a versioned JSON CLI. No built-in
+  model, model credentials, or agent loop is required.
+- **Asynchronous requests:** submit, inspect, approve, defer, or cancel requests
+  while the requesting agent continues other work.
+- **Daemonless operation:** an unprivileged CLI and an on-demand setuid helper
+  use SQLite for request state and audit events.
+- **Research-ready traces:** export privilege requests, context, decisions, and
+  execution results as JSONL.
+
+[Get started](#quick-start) · [Agent workflows](#agent-workflows) ·
+[Security model](#security-model) · [Documentation](#documentation)
+
+## Requirements
+
+- Linux with local user accounts. Release archives support **amd64** and **arm64**.
+- Root access for installation and an environment that permits setuid execution.
+  `nosuid` mounts, `no_new_privs`, or a host sandbox can prevent elevation.
+- **Go 1.26.9+** only when building from source. Release binaries are static and
+  do not require Go.
+
+## Quick start
+
+### Install
+
+Download the archive for your architecture and `checksums.txt` from
+[the latest release](https://github.com/agyard/agsudo/releases/latest) into an
+empty directory. For amd64, verify and extract it with:
 
 ```sh
-# 以 amd64 为例，在下载目录中执行
-sha256sum --ignore-missing -c checksums.txt
-tar -xzf agsudo_0.1.1_linux_amd64.tar.gz -C /path/to/empty-directory
-cd /path/to/empty-directory
-sudo ./scripts/install.sh "$(id -u)"
+sha256sum --ignore-missing --check checksums.txt &&
+  mkdir agsudo-package &&
+  tar -xzf agsudo_*_linux_amd64.tar.gz -C agsudo-package
 ```
 
-安装命令应从普通用户的 shell 运行，`id -u` 在提权前取到该用户的数字 UID。安装后：
+Use `linux_arm64` in the archive name for arm64. After verification succeeds,
+run these commands from your **ordinary user shell**:
 
 ```sh
+cd agsudo-package
+sudo ./scripts/install.sh "$(id -u)"
 agsudo doctor
+```
+
+`id -u` is evaluated before elevation, so the installer grants submission and
+review access to your ordinary account. It installs the CLI at
+`/usr/local/bin/agsudo` and the root-owned setuid helper at
+`/usr/local/libexec/agsudo-helper`. Configuration lives in
+`/etc/agsudo/config.json`; state lives in `/var/lib/agsudo`.
+
+To upgrade, unpack a new release and run its installer again. Upgrade both
+binaries together; existing configuration and state are preserved. The installer
+does not modify sudoers.
+
+### Try an approval
+
+In one terminal, open the approval UI:
+
+```sh
 agsudo review --tui
 ```
 
-安装器将 CLI 放到 `/usr/local/bin/agsudo`（root，0755），helper 放到 `/usr/local/libexec/agsudo-helper`（root，4755）。初次安装会在 `/etc/agsudo/config.json` 配置该用户的提交与审批权限，状态目录为 `/var/lib/agsudo`（root，0700）。升级保留配置和数据库，不修改系统 sudoers。
+In another terminal, submit a command:
 
-需要 Linux、本地用户账户和允许 setuid 的执行环境；`nosuid` 挂载、`no_new_privs` 或宿主沙箱可能阻止提权。应用以静态 Go 二进制构建，不实现 PAM、LDAP/SSSD NSS 或完整 sudo 兼容。
+```sh
+agsudo exec --reason 'Verify privilege approval' -- id
+```
 
-## 接入 Agent
+Select the request in the UI, press `a`, and press Enter to confirm. The waiting
+command runs as root. The UI also supports `d` to deny, `s` to defer to human
+review, `/` to filter, Tab to switch panes, `t` for events, `h` for history, and
+`q` to quit. You can inspect the requester, target, arguments, environment,
+context snapshots, and review suggestions before deciding.
 
-安装一次宿主集成，之后照常启动 Agent：
+### Connect your agent
+
+Install the integration for your host, then restart it:
 
 ```sh
 agsudo integration install codex
-# 或
+# Or:
 agsudo integration install claude
 ```
 
-安装器合并用户级 hook 配置，保留其他设置，并备份首次修改前的原文件。重启宿主以加载配置。**Codex 接入用于 Full Access 会话，还需在 `/hooks` 中信任新增 hook。** 集成不自动修改宿主权限或信任记录。卸载使用 `agsudo integration uninstall codex` 或 `claude`。
+**The Codex integration requires Full Access and trust for the hook in `/hooks`.**
+The installer merges user-level hook settings, preserves unrelated settings, and
+backs up the original configuration. It does not change host permissions or hook
+trust. To remove an integration, use `agsudo integration uninstall codex` or
+`agsudo integration uninstall claude`.
 
-其他 Agent 可以使用通用包装入口：
+For other agents, wrap the process:
 
 ```sh
 agsudo wrap -- your-agent
-# 或打开一个可交互体验的 shell
+# Or try an interactive shell:
 agsudo wrap -- bash
 ```
 
-在这些进程中，PATH 查找到的 `sudo` 会进入 AG-sudo。短暂等待保持安静，超过约两秒只显示一次：
+Inside the session, `sudo` calls resolved through PATH use AG-sudo. Approval waits
+are initially silent; after about two seconds, one hint appears:
 
 ```text
 sudo: approval pending; see 'sudo --help'
 ```
 
-批准后执行原命令，标准输入输出和退出码保留。`sudo --help` 提供进一步发现异步 CLI 的入口。宿主接入的工作方式和限制见 [integrations/README.md](integrations/README.md)。
+`sudo --help` points to the requester and reviewer guides. See the
+[integration guide](integrations/README.md) for hook behavior, tested host
+versions, and limitations.
 
-## 人工审批
+## Agent workflows
 
-在另一个终端运行：
+Use `agsudo COMMAND --help` or `agsudo help COMMAND` for command reference.
+The role guides describe how to work with the CLI:
 
 ```sh
-agsudo review --tui
+agsudo help --requester
+agsudo help --reviewer
 ```
 
-TUI 自动显示普通待办和转人工请求，可查看请求者、命令、目标用户、目录、执行环境、申请理由、文件快照和审批建议。`a` 批准、`d` 拒绝、`s` 转人工，填写可选理由后 Enter 确认；`/` 过滤，Tab 切换列表与详情，`t` 查看事件，`h` 切换历史，`q` 退出。
+### Submit without blocking
 
-也可以使用命令行：
-
-```sh
-agsudo review
-agsudo show req_ID
-agsudo approve req_ID --reason '符合任务范围'
-agsudo deny req_ID --reason '超出任务范围'
-```
-
-## 请求与异步执行
-
-`exec` 等待审批并执行；`request` 只提交，返回请求 ID，不会自行启动命令。
+`exec` waits for approval and runs a command. `request` only submits it and
+returns an ID; approval alone does not start a detached request.
 
 ```sh
-agsudo exec --reason '安装构建依赖' -- apt-get install -y libssl-dev
-agsudo request --json --context ./deployment-notes.txt -- systemctl restart example.service
-agsudo status req_ID --json
+agsudo --json request --reason 'Restart the application' -- systemctl restart example.service
+agsudo --json status req_ID
 agsudo exec --request req_ID
-agsudo cancel req_ID --reason '任务已改变'
+# If the request is no longer needed:
+agsudo cancel req_ID --reason 'Task changed'
 ```
 
-执行选项放在 COMMAND 之前，COMMAND 后的参数原样传递。请求内容固定，审批后不能替换参数或目标用户；授权只能执行一次，并从提交时起计算有效期。等待时 Ctrl-C 会取消申请；运行后的 Ctrl-C 传递给程序，`cancel` 只作用于尚未执行的请求。
+Replace `req_ID` with the returned `data.id`. Put `--json` before the subcommand
+so argument errors also use JSON. `exec` preserves the command's output and does
+not accept `--json`. Submission options must precede the command; arguments
+after the command are passed verbatim. Use repeatable `--context FILE` options
+to attach bounded UTF-8 snapshots read with the caller's permissions.
 
-支持 `-u USER`、`-n`、`-H`、无命令参数的 `-s/-i`、`--`、帮助和版本；其他 sudo 选项明确报错。交互式 shell 一次审批覆盖整个 shell 会话，其内部命令不再逐条审批。普通执行保留 cwd，`-i` 进入目标用户 home；执行环境经过清理，默认 umask 为 0077。
+A request is immutable, expires from the time of submission, and can execute
+only once. Ctrl-C while waiting cancels the attempt; after launch it reaches the
+command. `cancel` only affects requests that have not started.
 
-## 审批 Agent 与审计
-
-审批者使用相同的 JSON CLI，不需要模型 SDK：
-
-`agsudo help COMMAND` 与 `agsudo COMMAND --help` 提供命令参考；
-`help --requester` 和 `help --reviewer` 提供 Agent 工作流指南。
+### Review from another agent
 
 ```sh
 agsudo --json review
 agsudo --json show req_ID
-agsudo --json approve req_ID --expect-digest DIGEST --actor agent:reviewer --reason '范围明确'
-agsudo --json defer req_ID --recommend approve --summary '安装开发依赖' --reason '需要用户确认软件源'
+agsudo --json approve req_ID --expect-digest DIGEST --reason 'Within the requested scope'
+# If human judgment is needed:
+agsudo --json defer req_ID --recommend unknown \
+  --summary 'Restart the application service' \
+  --reason 'Confirm that interrupting active users is acceptable'
 ```
 
-`defer` 转为 `needs_human`，从默认 Agent 待办队列移出，保留给 TUI 或 `review --state needs_human`。申请理由、文件和建议都是不可信材料；接入建议见 [docs/reviewer.md](docs/reviewer.md)。
+Replace `DIGEST` with the digest of the request you inspected. `defer` moves the
+request to `needs_human`, removing it from the default agent queue while keeping
+it visible in the TUI and `review --state needs_human`. A waiting requester may
+start immediately after approval. Reviewers must treat arguments, attached files,
+and suggestions as untrusted evidence. See the [reviewer guide](docs/reviewer.md)
+for integration advice.
+
+### Follow and export events
 
 ```sh
-agsudo watch --json --after 42
+agsudo --json watch --after 42
 agsudo audit export --session ses_ID > trace.jsonl
 ```
 
-审计包含提权请求、上下文、建议、最终决定、执行起止与退出状态；事件序号支持断线续读。普通命令、终端按键和命令输出不记录。状态与审计事件在同一事务内提交。记录可能包含参数和显式附加文件中的敏感数据；本机 root 可以修改数据库。格式和状态机见 [docs/protocol.md](docs/protocol.md)。
+Events include privilege requests, context, suggestions, decisions, execution
+start/end, and exit status. Use the last processed sequence with `--after` to
+resume a stream. Ordinary commands, terminal keystrokes, and command output are
+not recorded. Traces may contain sensitive arguments or attached file contents;
+local root can modify the database. See the [protocol](docs/protocol.md) for
+schemas, states, and exit codes.
 
-## 权限范围
+## Security model
 
-`/etc/agsudo/config.json` 中的 `allowed_uids` 可提交并执行自己的请求，`reviewer_uids` 可查看和审批所有请求；root 可管理全部。审批者可以批准 root shell，因此应将审批权限视为可授权 root 操作的权限。同 UID 下主动自批不在隔离目标内。
+AG-sudo provides a collaboration boundary for privilege approval. It is not
+isolation against a hostile agent running under the same UID.
 
-PATH 接入不会拦截 `/usr/bin/sudo`、alias/function 或其他提权途径。可执行文件在提交时记录摘要、执行前重新检查，但这不冻结脚本依赖、配置文件或外部状态。完整边界见 [docs/architecture.md](docs/architecture.md)。
+- `allowed_uids` in `/etc/agsudo/config.json` can submit and execute their own
+  requests; `reviewer_uids` can inspect and decide all requests. Root can manage
+  all requests. Reviewers can authorize arbitrary root operations, including
+  root shells; processes sharing a reviewer's UID can call the same approval API.
+- The PATH shim does not intercept `/usr/bin/sudo`, shell aliases/functions, or
+  other elevation mechanisms. Host hooks do not remove these limitations.
+- Executables are hashed at submission and checked again before execution. This
+  does not freeze scripts' dependencies, configuration, or external state.
+- A shell approval covers the entire shell session; commands inside it are not
+  individually reviewed or audited. The execution environment is sanitized and
+  the default umask is `0077`.
 
-## 构建与测试
+The sudo shim supports `-u USER`, `-n`, `-H`, `-s`/`-i` without command arguments,
+`--`, help, and version. Other sudo options fail explicitly. AG-sudo does not
+implement PAM, LDAP/SSSD NSS, or full sudo compatibility. See the
+[architecture](docs/architecture.md) for the trust boundaries.
 
-源码构建需要 Go 1.26.9+：
+## Development
 
 ```sh
-make build       # bin/agsudo 和 bin/agsudo-helper
-make check       # go vet
-make test        # 单元测试及 race 检测
-make integration # CLI、真实终端和容器中的 setuid/安装测试
+git clone https://github.com/agyard/agsudo.git
+cd agsudo
+make build        # Production CLI and helper in bin/
+make check        # go vet
+make test         # Unit tests with the race detector
+make integration  # CLI, real terminal, and containerized setuid/install tests
 ```
 
-集成测试需要 Python 3、Bash 和 Docker；会按需拉取 Debian 测试镜像，不安装到宿主系统。ARM64 发布包由交叉编译验证，终端和提权测试在 Linux amd64 运行。
+Integration tests require Python 3, Bash, and Docker. They use disposable state
+and containers and do not install AG-sudo on the host. Set `AGSUDO_TEST_IMAGE` to
+a local Debian-compatible image when registry access is unavailable. Terminal
+and elevation tests run on Linux amd64; arm64 is cross-compiled.
 
-免 root 开发体验：
+To try the workflow without root or installation:
 
 ```sh
 make demo
 export AGSUDO_HELPER="$PWD/bin/agsudo-helper-dev"
 export AGSUDO_DEV_STATE="$PWD/.agsudo-dev"
 bin/agsudo exec -- id
-# 另一个终端设置相同变量后运行 bin/agsudo review --tui
+# In another terminal, set the same variables and run bin/agsudo review --tui.
 ```
 
-开发 helper 只允许当前 UID，拒绝 root 或 setuid 运行。生产二进制不包含开发路径覆盖。发布步骤见 [docs/releasing.md](docs/releasing.md)。
+The development helper only runs commands as the current UID and refuses root
+or setuid execution. Production builds do not include the development state
+path override.
 
-[Apache-2.0](LICENSE)。发布包附带第三方许可证。
+## Documentation
+
+| Guide | Contents |
+| --- | --- |
+| [Host integrations](integrations/README.md) | Codex and Claude Code hooks, setup, and troubleshooting |
+| [Reviewer agents](docs/reviewer.md) | Review policy, decisions, and event handling |
+| [CLI protocol](docs/protocol.md) | JSON/NDJSON, lifecycle, errors, and limits |
+| [Architecture](docs/architecture.md) | Helper, state storage, and privilege boundaries |
+| [Releasing](docs/releasing.md) | Packaging, validation, and release workflow |
+| [Release notes](https://github.com/agyard/agsudo/releases) | Changes and downloads |
+
+## Contributing
+
+[Open an issue](https://github.com/agyard/agsudo/issues) for a bug or a proposed
+change. Include the version, Linux distribution, reproduction steps, and relevant
+redacted diagnostics. Pull requests should keep the CLI small, document behavior
+changes, and pass the checks above.
+
+## License
+
+[Apache License 2.0](LICENSE). Release archives include third-party license notices.
