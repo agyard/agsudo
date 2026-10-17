@@ -1,4 +1,4 @@
-module github.com/thezzisu/agsudo
+module github.com/agyard/agsudo
 
 go 1.26.9
 

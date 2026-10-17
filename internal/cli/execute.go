@@ -12,10 +12,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/agyard/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/client"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/thezzisu/agsudo/internal/api"
-	"github.com/thezzisu/agsudo/internal/client"
 )
 
 type executionFlags struct {
@@ -101,9 +101,17 @@ Changing an executable after submission requires a new request.`,
 			if e.shell && e.login {
 				return usage(cmd, "choose either --shell or --login")
 			}
-			if e.id != "" {
-				if len(args) != 0 || e.user != "" || len(e.files) > 0 || e.shell || e.login || cmd.Flags().Changed("reason") || cmd.Flags().Changed("session") || cmd.Flags().Changed("ttl") {
+			if cmd.Flags().Changed("request") {
+				if e.id == "" {
+					return usage(cmd, "--request requires a nonempty request ID")
+				}
+				if len(args) != 0 {
 					return usage(cmd, "--request cannot replace any part of a submitted request")
+				}
+				for _, flag := range []string{"user", "context", "shell", "login", "reason", "session", "ttl"} {
+					if cmd.Flags().Changed(flag) {
+						return usage(cmd, "--request cannot be combined with --%s", flag)
+					}
 				}
 			} else {
 				if len(args) == 0 && !e.shell && !e.login {
@@ -133,6 +141,13 @@ Changing an executable after submission requires a new request.`,
 	}
 	e.flags(cmd.Flags())
 	if !detached {
+		cmd.Long += `
+
+Ctrl-C while waiting cancels the request; after launch it reaches the command.
+exec -n cancels an unapproved request instead of waiting.
+Before execution: 124 expired, 125 setup failure, 126 canceled, 127 unauthorized.
+After launch: the command's exit code, or 128 + signal.`
+		cmd.Example += "\n  agsudo exec --request req_ID"
 		cmd.Flags().StringVar(&e.id, "request", "", "Resume exactly this request without changing it")
 		cmd.Flags().BoolVarP(&e.nonInteractive, "non-interactive", "n", false, "Do not wait; cancel if approval is not already present")
 	}
@@ -250,10 +265,11 @@ Unsupported sudo options fail explicitly.
 AG-sudo workflow:
   This sudo may wait for approval; no password is requested.
   Async requests, status, cancellation:
-    agsudo help requester
-  Review requests:
-    agsudo review --tui
-    agsudo review --json`)
+    agsudo help --requester
+  Review requests from a person or another Agent:
+    agsudo help --reviewer
+  Human workbench:
+    agsudo review --tui`)
 		return 0
 	}
 	if version {

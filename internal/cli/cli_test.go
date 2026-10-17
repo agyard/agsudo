@@ -8,12 +8,12 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/thezzisu/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/api"
 )
 
 func TestHelpAndUsageDoNotOpenHelper(t *testing.T) {
 	t.Setenv("AGSUDO_HELPER", "/does/not/exist")
-	for _, args := range [][]string{{"--help"}, {"review", "--help"}, {"help", "audit", "export"}, {"help", "requester"}, {"version", "--json"}} {
+	for _, args := range [][]string{{"--help"}, {"help", "--help"}, {"review", "--help"}, {"status", "--help"}, {"watch", "--help"}, {"help", "audit", "export"}, {"help", "--requester"}, {"help", "--reviewer"}, {"version", "--json"}} {
 		var out, errOut bytes.Buffer
 		if code := Execute(context.Background(), args, strings.NewReader(""), &out, &errOut); code != 0 {
 			t.Fatalf("%v: %d %s", args, code, errOut.String())
@@ -22,7 +22,13 @@ func TestHelpAndUsageDoNotOpenHelper(t *testing.T) {
 			t.Fatalf("no help for %v", args)
 		}
 	}
-	for _, args := range [][]string{{"nonsense"}, {"approve"}, {"exec"}, {"exec", "--bad-flag"}, {"help", "nonsense"}, {"review", "--tui", "--json"}, {"exec", "--request", "req_x", "--", "id"}} {
+	for _, args := range [][]string{
+		{"nonsense"}, {"approve"}, {"exec"}, {"exec", "--bad-flag"},
+		{"help", "nonsense"}, {"help", "--requester", "review"}, {"help", "--requester", "--reviewer"},
+		{"review", "--tui", "--json"}, {"review", "--after", "42"}, {"review", "--all", "--state", "pending"},
+		{"exec", "--request", "req_x", "--", "id"}, {"exec", "--request", "", "-n", "--", "id"},
+		{"exec", "--request", "req_x", "--user", ""}, {"exec", "--request", "req_x", "--shell=false"},
+	} {
 		var out, errOut bytes.Buffer
 		if code := Execute(context.Background(), args, strings.NewReader(""), &out, &errOut); code != 2 {
 			t.Fatalf("%v: %d %s", args, code, errOut.String())

@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/thezzisu/agsudo/internal/cli"
+	"github.com/agyard/agsudo/internal/cli"
 )
 
 func main() {

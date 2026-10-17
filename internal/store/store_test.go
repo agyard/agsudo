@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thezzisu/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/api"
 )
 
 var testContext = context.Background()

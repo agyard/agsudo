@@ -10,8 +10,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/agyard/agsudo/internal/api"
 	"github.com/spf13/cobra"
-	"github.com/thezzisu/agsudo/internal/api"
 )
 
 func newIntegrationCommand(o *options) *cobra.Command {

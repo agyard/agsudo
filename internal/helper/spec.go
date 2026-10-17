@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
-	"github.com/thezzisu/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/api"
 )
 
 var sessionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{0,128}$`)

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/thezzisu/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/api"
 )
 
 // The development helper can never be used for privilege elevation, even if

@@ -14,9 +14,9 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/agyard/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/client"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/thezzisu/agsudo/internal/api"
-	"github.com/thezzisu/agsudo/internal/client"
 	"golang.org/x/term"
 )
 
@@ -340,8 +340,11 @@ func (m *reviewModel) View() tea.View {
 	foot := "a approve · d deny · s defer · / filter · Tab focus · t trace\nh history · r refresh · ↑/↓ navigate · PgUp/PgDn scroll · q quit"
 	if m.confirm != nil {
 		note := ""
-		if m.confirm.Spec.Scope == "shell_session" {
+		if m.action == "approve" && m.confirm.Spec.Scope == "shell_session" {
 			note = " · authorizes the entire shell session"
+		}
+		if m.action == "defer" {
+			note += " · moves to needs_human for human review"
 		}
 		foot = accent.Render(strings.ToUpper(m.action)+" "+m.confirm.ID+note) + "\n" + m.reason.View() + "\nEnter confirm · Esc back · PgUp/PgDn inspect"
 	}

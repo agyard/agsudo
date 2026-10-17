@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/thezzisu/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/api"
 )
 
 func Identity(pid int) api.Process {

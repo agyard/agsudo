@@ -11,9 +11,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/thezzisu/agsudo/internal/api"
-	"github.com/thezzisu/agsudo/internal/proc"
-	"github.com/thezzisu/agsudo/internal/store"
+	"github.com/agyard/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/proc"
+	"github.com/agyard/agsudo/internal/store"
 )
 
 const approvalNoticeDelay = 2 * time.Second
@@ -29,7 +29,7 @@ func (u executionUI) help() string {
 	if u.sudo {
 		return "sudo --help"
 	}
-	return "agsudo help requester"
+	return "agsudo help --requester"
 }
 func (u executionUI) message(message string) {
 	prefix := "agsudo"

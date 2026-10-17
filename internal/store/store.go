@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/thezzisu/agsudo/internal/api"
-	"github.com/thezzisu/agsudo/internal/proc"
+	"github.com/agyard/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/proc"
 	_ "modernc.org/sqlite"
 )
 

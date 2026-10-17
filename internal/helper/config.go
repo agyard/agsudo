@@ -11,8 +11,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/thezzisu/agsudo/internal/api"
-	"github.com/thezzisu/agsudo/internal/store"
+	"github.com/agyard/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/store"
 )
 
 const ConfigPath = "/etc/agsudo/config.json"

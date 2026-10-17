@@ -229,8 +229,8 @@ class Integration(unittest.TestCase):
     def test_sudo_help_discovers_async_workflow_and_shim(self):
         p = self.call("wrap", "--", "sh", "-c", "sudo --help")
         self.assertIn("AG-sudo workflow", p.stdout)
-        p = self.call("wrap", "--", "sh", "-c", "agsudo help requester")
-        self.assertIn("agsudo request --json", p.stdout)
+        p = self.call("wrap", "--", "sh", "-c", "agsudo help --requester")
+        self.assertIn("agsudo --json request", p.stdout)
 
     def test_wait_hint_once_and_no_hint_during_execution(self):
         p, rid = self.start_waiting("wrap", "--", "sudo", "true")

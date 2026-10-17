@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/thezzisu/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/api"
 )
 
 const codexHookMarker = "# agsudo environment v1\n"

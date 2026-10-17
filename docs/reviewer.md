@@ -1,9 +1,11 @@
 # 接入审批 Agent
 
 审批者使用普通 CLI，不需要 SDK，也不需要在 AG-sudo 内安装模型或编写插件。
+`agsudo help --reviewer` 提供命令行内的入门指南。自动化调用把 `--json`
+放在最前面，让参数解析错误也使用 JSON。
 
-1. `agsudo review --json` 获取 pending 队列；或订阅 `agsudo review --watch --json`。
-2. `agsudo show REQUEST_ID --json` 获取完整命令和上下文。必要时通过自己的工具进一步检查。
+1. `agsudo --json review` 获取 pending 队列；或订阅 `agsudo --json watch`。
+2. `agsudo --json show REQUEST_ID` 获取完整命令和上下文。必要时通过自己的工具进一步检查。
 3. 范围明确则 `approve`；明确不允许则 `deny`；不确定则 `defer`，写入短描述、理由及建议，让用户从 TUI 判断。
 4. 携带 `--expect-digest`，处理 `conflict`、`expired`、`canceled`，不要通过重新提交请求来绕过这些结果。
 
@@ -19,15 +21,15 @@
 例如：
 
 ```bash
-agsudo show req_ID --json
-agsudo approve req_ID --expect-digest DIGEST \
+agsudo --json show req_ID
+agsudo --json approve req_ID --expect-digest DIGEST \
   --actor agent:build-reviewer --reason '只安装用户要求的开发依赖' \
-  --metadata policy=build-v1 --json
+  --metadata policy=build-v1
 
-agsudo defer req_ID --expect-digest DIGEST \
+agsudo --json defer req_ID --expect-digest DIGEST \
   --actor agent:build-reviewer --recommend unknown \
   --summary '将启动可执行任意命令的 root shell' \
-  --reason '当前任务未明确授权开放式 root 会话' --json
+  --reason '当前任务未明确授权开放式 root 会话'
 ```
 
 权限来自 root 配置中的 `reviewer_uids`。`--actor` 是声明的标签，无法在同一 UID 下证明“真人”或“某个模型”。当前接口不提供排他 claim；多个审批者可同时读取，最终决定由事务串行化，第一个有效决定生效。相同 UID 的同方向最终决定重试不会新增事件。

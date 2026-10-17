@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 GO ?= go
 VERSION ?= dev
-LDFLAGS := -s -w -X github.com/thezzisu/agsudo/internal/cli.Version=$(VERSION)
+LDFLAGS := -s -w -X github.com/agyard/agsudo/internal/cli.Version=$(VERSION)
 
 .PHONY: build demo test check integration install clean
 build:

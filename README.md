@@ -6,12 +6,12 @@ AG-sudo 为 Linux 上的 Agent 工作流提供提权审批。Agent 保留普通�
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/thezzisu/agsudo/releases) 下载 Linux `amd64` 或 `arm64` 压缩包及 `checksums.txt`，校验并解压。压缩包内包含两个可执行文件和安装脚本，不需要 Go。
+从 [GitHub Releases](https://github.com/agyard/agsudo/releases) 下载 Linux `amd64` 或 `arm64` 压缩包及 `checksums.txt`，校验并解压。压缩包内包含两个可执行文件和安装脚本，不需要 Go。
 
 ```sh
 # 以 amd64 为例，在下载目录中执行
 sha256sum --ignore-missing -c checksums.txt
-tar -xzf agsudo_0.1.0_linux_amd64.tar.gz -C /path/to/empty-directory
+tar -xzf agsudo_0.1.1_linux_amd64.tar.gz -C /path/to/empty-directory
 cd /path/to/empty-directory
 sudo ./scripts/install.sh "$(id -u)"
 ```
@@ -63,7 +63,7 @@ sudo: approval pending; see 'sudo --help'
 agsudo review --tui
 ```
 
-TUI 自动显示普通待办和转人工请求，可查看命令、目标用户、目录、申请理由、文件快照和审批建议。`a` 批准、`d` 拒绝、`s` 转人工，填写可选理由后 Enter 确认；`/` 过滤，Tab 切换列表与详情，`t` 查看事件，`h` 切换历史，`q` 退出。
+TUI 自动显示普通待办和转人工请求，可查看请求者、命令、目标用户、目录、执行环境、申请理由、文件快照和审批建议。`a` 批准、`d` 拒绝、`s` 转人工，填写可选理由后 Enter 确认；`/` 过滤，Tab 切换列表与详情，`t` 查看事件，`h` 切换历史，`q` 退出。
 
 也可以使用命令行：
 
@@ -94,11 +94,14 @@ agsudo cancel req_ID --reason '任务已改变'
 
 审批者使用相同的 JSON CLI，不需要模型 SDK：
 
+`agsudo help COMMAND` 与 `agsudo COMMAND --help` 提供命令参考；
+`help --requester` 和 `help --reviewer` 提供 Agent 工作流指南。
+
 ```sh
-agsudo review --json
-agsudo show req_ID --json
-agsudo approve req_ID --expect-digest DIGEST --actor agent:reviewer --reason '范围明确' --json
-agsudo defer req_ID --recommend approve --summary '安装开发依赖' --reason '需要用户确认软件源' --json
+agsudo --json review
+agsudo --json show req_ID
+agsudo --json approve req_ID --expect-digest DIGEST --actor agent:reviewer --reason '范围明确'
+agsudo --json defer req_ID --recommend approve --summary '安装开发依赖' --reason '需要用户确认软件源'
 ```
 
 `defer` 转为 `needs_human`，从默认 Agent 待办队列移出，保留给 TUI 或 `review --state needs_human`。申请理由、文件和建议都是不可信材料；接入建议见 [docs/reviewer.md](docs/reviewer.md)。

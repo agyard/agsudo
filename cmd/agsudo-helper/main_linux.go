@@ -3,7 +3,7 @@
 package main
 
 import (
-	"github.com/thezzisu/agsudo/internal/helper"
+	"github.com/agyard/agsudo/internal/helper"
 	"os"
 )
 

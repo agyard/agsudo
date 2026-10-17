@@ -11,7 +11,7 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/thezzisu/agsudo/internal/api"
+	"github.com/agyard/agsudo/internal/api"
 )
 
 const DefaultHelper = "/usr/local/libexec/agsudo-helper"

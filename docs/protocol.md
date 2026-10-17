@@ -1,8 +1,13 @@
 # CLI protocol v1
 
-Use `agsudo help COMMAND` for flags. Protocol JSON has a fixed `schema_version: 1`.
+Use `agsudo help COMMAND` for command flags, `agsudo help --requester` for the
+requesting Agent workflow, and `agsudo help --reviewer` for the reviewing Agent
+workflow. Protocol JSON has a fixed `schema_version: 1`.
 
 ## Control output
+
+For automated calls, put `--json` first (`agsudo --json approve REQUEST_ID`)
+so even flag parsing errors use JSON. Help is always text.
 
 Success goes to stdout:
 
@@ -20,7 +25,7 @@ Errors go to stderr, with nonzero exit status:
 
 The digest is SHA-256 of Go's canonical struct JSON encoding of the immutable `spec`. Consumers should reuse the supplied digest rather than independently reserializing JSON. Digest matching does not freeze the filesystem or external services.
 
-`exec` and `wrap` do not support `--json`; command stdout/stderr remain command streams. Use `request`, `status` and event streams for machine state. The sudo-compatible path stays quiet until approval has been pending for about two seconds, then prints only `sudo: approval pending; see 'sudo --help'` once. `agsudo exec` uses the analogous `agsudo help requester` hint.
+`exec` and `wrap` do not support `--json`; command stdout/stderr remain command streams. Use `request`, `status` and event streams for machine state. The sudo-compatible path stays quiet until approval has been pending for about two seconds, then prints only `sudo: approval pending; see 'sudo --help'` once. `agsudo exec` uses the analogous `agsudo help --requester` hint.
 
 ## States
 
