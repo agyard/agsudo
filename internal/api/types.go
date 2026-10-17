@@ -7,7 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
 )
 
 const Version = 1
@@ -56,11 +60,33 @@ type Spec struct {
 func Digest(v any) string  { b, _ := json.Marshal(v); return Hash(b) }
 func Hash(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 func ID(prefix string) string {
-	b := make([]byte, 16)
+	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
 	return prefix + hex.EncodeToString(b)
+}
+
+var sessionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+
+// ValidSession reports whether a session label is acceptable; empty means none.
+func ValidSession(s string) bool { return s == "" || sessionPattern.MatchString(s) }
+
+// Safe escapes control and format characters in untrusted text for terminals.
+// Multiline text keeps newlines and tabs.
+func Safe(s string, multiline bool) string {
+	var b strings.Builder
+	for _, r := range s {
+		if multiline && (r == '\n' || r == '\t') {
+			b.WriteRune(r)
+		} else if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 type Process struct {
@@ -91,7 +117,7 @@ type Request struct {
 	ExpiresAt     time.Time `json:"expires_at"`
 	Detached      bool      `json:"detached"`
 	Submitter     Process   `json:"submitter"`
-	Executor      Process   `json:"executor,omitempty"`
+	Executor      Process   `json:"executor,omitzero"`
 	CommandPID    int       `json:"command_pid,omitempty"`
 	Decision      *Decision `json:"decision,omitempty"`
 	Suggestion    *Decision `json:"suggestion,omitempty"`
@@ -124,29 +150,28 @@ type List struct {
 
 // Input is an internal transport envelope. Identity is never accepted from it.
 type Input struct {
-	Operation      string            `json:"operation"`
-	ID             string            `json:"id,omitempty"`
-	Argv           []string          `json:"argv,omitempty"`
-	Cwd            string            `json:"cwd,omitempty"`
-	User           string            `json:"user,omitempty"`
-	Reason         string            `json:"reason,omitempty"`
-	Context        []File            `json:"context,omitempty"`
-	Session        string            `json:"session,omitempty"`
-	Term           string            `json:"term,omitempty"`
-	TTLSeconds     int64             `json:"ttl_seconds,omitempty"`
-	Detached       bool              `json:"detached,omitempty"`
-	Shell          bool              `json:"shell,omitempty"`
-	Login          bool              `json:"login,omitempty"`
-	NonInteractive bool              `json:"non_interactive,omitempty"`
-	Action         string            `json:"action,omitempty"`
-	Actor          string            `json:"actor,omitempty"`
-	Summary        string            `json:"summary,omitempty"`
-	Recommend      string            `json:"recommend,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	ExpectDigest   string            `json:"expect_digest,omitempty"`
-	States         []string          `json:"states,omitempty"`
-	Cursor         int64             `json:"cursor,omitempty"`
-	Limit          int               `json:"limit,omitempty"`
+	Operation    string            `json:"operation"`
+	ID           string            `json:"id,omitempty"`
+	Argv         []string          `json:"argv,omitempty"`
+	Cwd          string            `json:"cwd,omitempty"`
+	User         string            `json:"user,omitempty"`
+	Reason       string            `json:"reason,omitempty"`
+	Context      []File            `json:"context,omitempty"`
+	Session      string            `json:"session,omitempty"`
+	Term         string            `json:"term,omitempty"`
+	TTLSeconds   int64             `json:"ttl_seconds,omitempty"`
+	Detached     bool              `json:"detached,omitempty"`
+	Shell        bool              `json:"shell,omitempty"`
+	Login        bool              `json:"login,omitempty"`
+	Action       string            `json:"action,omitempty"`
+	Actor        string            `json:"actor,omitempty"`
+	Summary      string            `json:"summary,omitempty"`
+	Recommend    string            `json:"recommend,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	ExpectDigest string            `json:"expect_digest,omitempty"`
+	States       []string          `json:"states,omitempty"`
+	Cursor       int64             `json:"cursor,omitempty"`
+	Limit        int               `json:"limit,omitempty"`
 }
 type Response struct {
 	SchemaVersion int             `json:"schema_version"`

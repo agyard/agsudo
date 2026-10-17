@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,35 +20,38 @@ import (
 )
 
 type executionFlags struct {
-	user, reason, session, id    string
-	files                        []string
-	ttl                          time.Duration
-	shell, login, nonInteractive bool
+	user, reason, session, id string
+	files                     []string
+	ttl                       time.Duration
+	shell, login              bool
 }
 
 func (e *executionFlags) flags(f *pflag.FlagSet) {
 	f.SetInterspersed(false)
 	f.StringVarP(&e.user, "user", "u", "", "Target user; prefix a numeric UID with # (default root)")
-	f.StringVar(&e.reason, "reason", os.Getenv("AGSUDO_REASON"), "Purpose of the privilege request")
+	f.StringVar(&e.reason, "reason", "", "Why the command needs privileges, shown to the reviewer")
 	f.StringVar(&e.session, "session", os.Getenv("AGSUDO_SESSION"), "Correlate requests within a workflow")
-	f.StringArrayVar(&e.files, "context", nil, "Attach a UTF-8 file snapshot (repeatable, read as the caller)")
+	f.StringArrayVar(&e.files, "context", nil, "Attach a UTF-8 file snapshot for the reviewer (repeatable)")
 	f.DurationVar(&e.ttl, "ttl", 0, "Approval validity, e.g. 10m (default configured by administrator)")
 	f.BoolVarP(&e.shell, "shell", "s", false, "Request the target user's interactive shell")
 	f.BoolVarP(&e.login, "login", "i", false, "Request a login shell in the target user's home")
 }
 func (e executionFlags) input(args []string, detached bool) (api.Input, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return api.Input{}, err
+	if e.shell && e.login {
+		return api.Input{}, api.Err("usage", "choose either --shell or --login")
+	}
+	if len(args) == 0 && !e.shell && !e.login {
+		return api.Input{}, api.Err("usage", "a command, -s/--shell or -i/--login is required")
 	}
 	if e.ttl < 0 || (e.ttl > 0 && e.ttl < time.Second) {
 		return api.Input{}, api.Err("usage", "ttl must be at least one second")
 	}
-	in := api.Input{Operation: "create", Argv: args, Cwd: cwd, User: e.user, Reason: e.reason, Session: e.session, Term: os.Getenv("TERM"), TTLSeconds: int64(e.ttl / time.Second), Detached: detached, Shell: e.shell, Login: e.login}
-	if len(e.files) > 8 {
-		return in, api.Err("usage", "at most 8 context files")
+	cwd, err := os.Getwd()
+	if err != nil {
+		return api.Input{}, err
 	}
-	total := 0
+	in := api.Input{Operation: "create", Argv: args, Cwd: cwd, User: e.user, Reason: e.reason, Session: e.session, Term: os.Getenv("TERM"), TTLSeconds: int64(e.ttl / time.Second), Detached: detached, Shell: e.shell, Login: e.login}
+	// Snapshots are read with the caller's permissions; the helper enforces limits.
 	for _, name := range e.files {
 		path, err := filepath.Abs(name)
 		if err != nil {
@@ -58,48 +62,74 @@ func (e executionFlags) input(args []string, detached bool) (api.Input, error) {
 			return in, err
 		}
 		st, err := f.Stat()
-		if err != nil {
-			f.Close()
-			return in, err
+		var b []byte
+		if err == nil && !st.Mode().IsRegular() {
+			err = api.Err("usage", "context must be a regular file: %s", name)
+		} else if err == nil {
+			b, err = io.ReadAll(io.LimitReader(f, 64<<10+1))
 		}
-		if !st.Mode().IsRegular() {
-			f.Close()
-			return in, api.Err("usage", "context must be a regular file: %s", name)
-		}
-		b, err := io.ReadAll(io.LimitReader(f, 65537))
 		f.Close()
 		if err != nil {
 			return in, err
 		}
-		total += len(b)
-		if len(b) > 65536 || total > 256<<10 || !utf8.Valid(b) {
-			return in, api.Err("usage", "context requires UTF-8 files <= 64 KiB, <= 256 KiB total")
+		if !utf8.Valid(b) {
+			return in, api.Err("usage", "context must be UTF-8 text: %s", name)
 		}
-		in.Context = append(in.Context, api.File{Path: path, SHA256: api.Hash(b), Content: string(b), Source: "caller_supplied"})
+		in.Context = append(in.Context, api.File{Path: path, Content: string(b)})
 	}
 	return in, nil
 }
+
+// submit creates the request unless one is being resumed, then replaces this
+// process with the helper, which waits for approval and runs it once.
+func submit(ctx context.Context, e executionFlags, args []string, sudo bool) error {
+	c := client.New()
+	if e.id == "" {
+		in, err := e.input(args, false)
+		if err != nil {
+			return err
+		}
+		var r api.Request
+		if err = c.Call(ctx, in, &r); err != nil {
+			return err
+		}
+		e.id = r.ID
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return c.Exec(e.id, sudo)
+}
+
 func newExecute(o *options, detached bool) *cobra.Command {
 	var e executionFlags
-	name, short := "exec", "Wait for approval and execute once with inherited terminal and streams"
+	name, short := "exec", "Wait for approval, then run a command once"
 	if detached {
-		name, short = "request", "Submit an immutable request without waiting or executing"
+		name, short = "request", "Submit a request without waiting; prints its ID"
 	}
 	cmd := &cobra.Command{Use: name + " [OPTIONS] -- COMMAND [ARGUMENTS...]", Short: short,
 		Long: short + `.
 
 Options precede COMMAND; command arguments are passed verbatim. --context reads
-bounded snapshots as the caller. Shell sessions authorize all work inside that
-shell; they do not provide per-command review. Target environment is sanitized.
-An approved detached request only executes when resumed with exec --request.
-Changing an executable after submission requires a new request.`,
-		Example: "  agsudo " + name + " --reason 'install build dependencies' -- apt-get install -y libssl-dev\n  agsudo " + name + " -u postgres -- psql\n  agsudo " + name + " -s",
+bounded snapshots as the caller; they are not re-read at execution. Approving a
+shell (-s/-i or a bare shell) authorizes everything run inside it. The target
+environment is sanitized. Changing the executable after submission requires a
+new request.`,
+		Example: "  agsudo " + name + " --reason 'install build dependencies' -- dnf install -y openssl-devel\n  agsudo " + name + " -u postgres -- psql\n  agsudo " + name + " -s",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !detached && o.json {
-				return usage(cmd, "exec preserves command output; use request/status --json")
+			if detached {
+				in, err := e.input(args, true)
+				if err != nil {
+					return usageError(cmd, err)
+				}
+				var r api.Request
+				if err = o.client().Call(cmd.Context(), in, &r); err != nil {
+					return err
+				}
+				return o.print(cmd, r, r.ID)
 			}
-			if e.shell && e.login {
-				return usage(cmd, "choose either --shell or --login")
+			if o.json {
+				return usage(cmd, "exec preserves command output; use request/status --json")
 			}
 			if cmd.Flags().Changed("request") {
 				if e.id == "" {
@@ -113,65 +143,55 @@ Changing an executable after submission requires a new request.`,
 						return usage(cmd, "--request cannot be combined with --%s", flag)
 					}
 				}
-			} else {
-				if len(args) == 0 && !e.shell && !e.login {
-					return usage(cmd, "a command or --shell/--login is required")
-				}
-				in, err := e.input(args, detached)
-				if err != nil {
-					return err
-				}
-				var r api.Request
-				if err = o.client().Call(cmd.Context(), in, &r); err != nil {
-					return err
-				}
-				e.id = r.ID
-				if detached {
-					return o.print(cmd, r, r.ID)
-				}
 			}
-			if cmd.Context().Err() != nil {
-				_ = o.client().Call(context.Background(), api.Input{Operation: "cancel", ID: e.id, Reason: "client interrupted before waiting"}, nil)
-				return cmd.Context().Err()
-			}
-			return o.client().Run(cmd.Context(), e.id, client.RunOptions{
-				NonInteractive: e.nonInteractive,
-			}, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+			return usageError(cmd, submit(cmd.Context(), e, args, false))
 		},
 	}
 	e.flags(cmd.Flags())
 	if !detached {
 		cmd.Long += `
 
-Ctrl-C while waiting cancels the request; after launch it reaches the command.
-exec -n cancels an unapproved request instead of waiting.
-Before execution: 124 expired, 125 setup failure, 126 canceled, 127 unauthorized.
-After launch: the command's exit code, or 128 + signal.`
+Ctrl-C while waiting cancels the request; once the command runs, signals reach
+it. If the wait ends any other way (timeout, kill, hangup), the request stays
+pending: resume it with exec --request. A command that does not start exits 1
+and says why; otherwise exec exits with its status, or 128 + signal.`
 		cmd.Example += "\n  agsudo exec --request req_ID"
-		cmd.Flags().StringVar(&e.id, "request", "", "Resume exactly this request without changing it")
-		cmd.Flags().BoolVarP(&e.nonInteractive, "non-interactive", "n", false, "Do not wait; cancel if approval is not already present")
+		cmd.Flags().StringVar(&e.id, "request", "", "Wait for and run this submitted request")
 	}
 	return cmd
 }
 
+// usageError adds command help to CLI-side validation errors.
+func usageError(cmd *cobra.Command, err error) error {
+	var e *api.Error
+	if errors.As(err, &e) && e.Code == "usage" {
+		return usage(cmd, "%s", e.Message)
+	}
+	return err
+}
+
 func newWrap(o *options) *cobra.Command {
-	var session, reason string
-	cmd := &cobra.Command{Use: "wrap [OPTIONS] -- COMMAND [ARGUMENTS...]", Short: "Run an Agent with sudo routed through AG-sudo", Args: cobra.MinimumNArgs(1),
-		Long: `Create a workflow session and prepend a sudo shim to PATH. The command replaces
-the wrapper, preserving its terminal, process lifetime, and exit status. Only sudo
-lookups through PATH are intercepted; absolute /usr/bin/sudo and shell overrides
-remain outside this mechanism. No ordinary command tracing is performed.`,
-		Example: "  agsudo wrap -- your-agent\n  agsudo wrap --reason 'prepare development environment' -- bash",
+	var session string
+	cmd := &cobra.Command{Use: "wrap [OPTIONS] -- COMMAND [ARGUMENTS...]", Short: "Run an agent with sudo routed through AG-sudo", Args: cobra.MinimumNArgs(1),
+		Long: `Run COMMAND with a sudo shim first in PATH and AGSUDO_SESSION set, so its sudo
+calls are approved through AG-sudo and grouped in one session. The command
+replaces the wrapper, keeping its terminal, process lifetime and exit status.
+Only sudo found through PATH is covered; /usr/bin/sudo and shell overrides are
+not. Ordinary commands are not traced.`,
+		Example: "  agsudo wrap -- your-agent\n  agsudo wrap -- bash",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if o.json {
 				return usage(cmd, "wrap preserves the command's output and does not support --json")
 			}
+			if session == "" {
+				session = api.ID("ses_")
+			}
+			if !api.ValidSession(session) {
+				return usage(cmd, "session labels use 1-128 letters, digits and _.:-")
+			}
 			dir, err := ensureShim()
 			if err != nil {
 				return err
-			}
-			if session == "" {
-				session = api.ID("ses_")
 			}
 			// Resolve the wrapped command through the new PATH too, so wrapping
 			// sudo itself is covered as well as sudo calls in its descendants.
@@ -183,21 +203,18 @@ remain outside this mechanism. No ordinary command tracing is performed.`,
 			if err != nil {
 				return err
 			}
-			helper, err := filepath.Abs(o.helper)
+			helper, err := filepath.Abs(client.New().Helper)
 			if err != nil {
 				return err
 			}
 			env := os.Environ()
-			env = setEnv(env, "PATH", wrappedPath)
 			env = setEnv(env, "AGSUDO_SESSION", session)
 			env = setEnv(env, "AGSUDO_HELPER", helper)
-			env = setEnv(env, "AGSUDO_REASON", reason)
 			return syscall.Exec(path, args, env)
 		},
 	}
 	cmd.Flags().SetInterspersed(false)
-	cmd.Flags().StringVar(&session, "session", "", "Use an existing session label")
-	cmd.Flags().StringVar(&reason, "reason", "", "Default purpose for this session's requests")
+	cmd.Flags().StringVar(&session, "session", os.Getenv("AGSUDO_SESSION"), "Session label (default: inherited or new)")
 	return cmd
 }
 
@@ -246,59 +263,50 @@ func setEnv(env []string, key, value string) []string {
 // sudo compatibility uses pflag, with option parsing stopping at COMMAND.
 func sudo(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
 	f := pflag.NewFlagSet("sudo", pflag.ContinueOnError)
-	f.SetOutput(errOut)
+	f.SetOutput(io.Discard)
 	var e executionFlags
 	e.flags(f)
-	var help, version, home bool
-	f.BoolVarP(&help, "help", "h", false, "Show supported options")
-	f.BoolVarP(&version, "version", "V", false, "Show AG-sudo version")
-	f.BoolVarP(&home, "set-home", "H", false, "Set target HOME (always enabled)")
-	f.BoolVarP(&e.nonInteractive, "non-interactive", "n", false, "Fail instead of waiting for approval")
+	var help, version, home, nonInteractive, reset bool
+	f.BoolVarP(&help, "help", "h", false, "")
+	f.BoolVarP(&version, "version", "V", false, "")
+	f.BoolVarP(&home, "set-home", "H", false, "")
+	f.BoolVarP(&nonInteractive, "non-interactive", "n", false, "")
+	f.BoolVarP(&reset, "reset-timestamp", "k", false, "")
 	if err := f.Parse(args); err != nil {
-		fmt.Fprintln(errOut, "sudo:", err)
+		fmt.Fprintf(errOut, "sudo: %v; see 'sudo --help'\n", err)
 		return 2
 	}
-	if help {
-		fmt.Fprintln(out, `sudo (AG-sudo): sudo [-u USER] [-n] [-H] [-s|-i] [--] COMMAND [ARGS...]
-Unsupported sudo options fail explicitly.
-
-AG-sudo workflow:
-  This sudo may wait for approval; no password is requested.
-  Async requests, status, cancellation:
-    agsudo help --requester
-  Review requests from a person or another Agent:
-    agsudo help --reviewer
-  Human workbench:
-    agsudo review --tui`)
+	switch {
+	case help:
+		fmt.Fprintln(out, sudoHelp)
 		return 0
-	}
-	if version {
+	case version:
 		fmt.Fprintln(out, "sudo (AG-sudo)", Version)
 		return 0
+	case reset && len(f.Args()) == 0 && !e.shell && !e.login:
+		return 0 // There are no cached credentials to forget.
+	case nonInteractive:
+		fmt.Fprintln(errOut, "sudo: approval required; -n does not wait (submit with 'agsudo request', see 'sudo --help')")
+		return 1
 	}
-	if (e.shell && e.login) || (len(f.Args()) == 0 && !e.shell && !e.login) {
-		fmt.Fprintln(errOut, "sudo: specify a command, -s, or -i; use sudo --help")
+	err := submit(ctx, e, f.Args(), true)
+	var usageErr *api.Error
+	if errors.As(err, &usageErr) && usageErr.Code == "usage" {
+		fmt.Fprintf(errOut, "sudo: %s; see 'sudo --help'\n", usageErr.Message)
 		return 2
 	}
-	helper := os.Getenv("AGSUDO_HELPER")
-	if helper == "" {
-		helper = client.DefaultHelper
-	}
-	c := client.Client{Helper: helper}
-	req, err := e.input(f.Args(), false)
-	if err != nil {
-		return reportAs(err, false, errOut, "sudo")
-	}
-	var r api.Request
-	if err = c.Call(ctx, req, &r); err != nil {
-		return reportAs(err, false, errOut, "sudo")
-	}
-	if ctx.Err() != nil {
-		_ = c.Call(context.Background(), api.Input{Operation: "cancel", ID: r.ID, Reason: "client interrupted before waiting"}, nil)
-		return 130
-	}
-	return reportAs(c.Run(ctx, r.ID, client.RunOptions{
-		NonInteractive: e.nonInteractive,
-		Sudo:           true,
-	}, in, out, errOut), false, errOut, "sudo")
+	return report(err, false, errOut, "sudo")
 }
+
+const sudoHelp = `sudo (AG-sudo): sudo [-u USER] [-H] [-s|-i] [--reason TEXT] [--] COMMAND [ARGS...]
+
+sudo here waits until a person or a reviewing agent approves the command, then
+runs it once; no password is asked. After two seconds it prints the request ID.
+Ctrl-C cancels the wait. If the wait ends any other way (a tool timeout, kill
+or hangup), the request stays pending; resume it with
+  agsudo exec --request REQUEST_ID
+-n fails instead of waiting and -k is ignored. Other sudo options, environment
+assignments and preserved environments are not supported.
+
+Submit without waiting, check status, cancel: agsudo help --requester
+Review requests as a person: agsudo review --tui`

@@ -58,7 +58,7 @@ func decode(r io.Reader) (api.Input, error) {
 	if d.Decode(new(any)) != io.EOF {
 		return in, api.Err("invalid_input", "trailing protocol data")
 	}
-	if len(in.ID) > 128 || len(in.Actor) > 128 || len(in.Reason) > 8192 || len(in.Summary) > 8192 || len(in.Metadata) > 32 || in.Cursor < 0 || in.Limit < 0 {
+	if len(in.Actor) > 128 || len(in.Reason) > 8192 || len(in.Summary) > 8192 || len(in.Metadata) > 32 || in.Cursor < 0 || in.Limit < 0 {
 		return in, api.Err("invalid_input", "invalid request fields")
 	}
 	for k, v := range in.Metadata {
@@ -66,7 +66,7 @@ func decode(r io.Reader) (api.Input, error) {
 			return in, api.Err("invalid_input", "metadata too large")
 		}
 	}
-	if !sessionPattern.MatchString(in.Session) {
+	if !api.ValidSession(in.Session) {
 		return in, api.Err("invalid_input", "invalid session")
 	}
 	if in.Recommend != "" && in.Recommend != "approve" && in.Recommend != "deny" && in.Recommend != "unknown" {
@@ -97,21 +97,23 @@ func openStore(c Config) (*store.Store, error) {
 
 // Main is deliberately a small fixed protocol, not a general root command
 // dispatcher. The public CLI and its UI libraries are absent from this binary.
+// "rpc" reads one JSON request from stdin; "run ID" and "run-sudo ID" replace
+// the CLI process, wait for approval and execute with the caller's terminal.
 func Main(args []string) int {
-	if len(args) != 1 || (args[0] != "rpc" && args[0] != "run" && args[0] != "run-sudo") {
+	run := len(args) == 2 && (args[0] == "run" || args[0] == "run-sudo")
+	if !run && (len(args) != 1 || args[0] != "rpc") {
 		fmt.Fprintln(os.Stderr, "agsudo-helper is an internal program; use agsudo --help")
 		return 2
 	}
-	run := args[0] != "rpc"
 	ui := executionUI{sudo: args[0] == "run-sudo", out: os.Stderr}
 	fail := func(err error) int {
 		if run {
-			ui.message(err.Error())
-			return 125
+			ui.message("%v", err)
+			return 1
 		}
 		return respond(nil, err)
 	}
-	syscall.Umask(0077)
+	umask := syscall.Umask(0077)
 	c, err := loadConfig()
 	if err != nil {
 		return fail(err)
@@ -127,14 +129,14 @@ func Main(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	input := os.Stdin
+	var in api.Input
 	if run {
-		input = os.NewFile(3, "agsudo-protocol")
-		defer input.Close()
-	}
-	in, err := decode(input)
-	if err != nil {
+		in.ID = args[1]
+	} else if in, err = decode(os.Stdin); err != nil {
 		return fail(err)
+	}
+	if len(in.ID) > 128 {
+		return fail(api.Err("invalid_input", "invalid request ID"))
 	}
 	s, err := openStore(c)
 	if err != nil {
@@ -142,18 +144,13 @@ func Main(args []string) int {
 	}
 	defer s.Close()
 	if run {
-		return runRequest(s, c, a, in, ui)
+		return runRequest(s, c, a, in.ID, umask, ui)
 	}
 	data, err := dispatch(context.Background(), s, c, a, gid, in)
 	return respond(data, err)
 }
 
 func dispatch(ctx context.Context, s *store.Store, c Config, a store.Access, gid int, in api.Input) (any, error) {
-	if in.Operation == "list" || in.Operation == "events" || in.Operation == "create" {
-		if err := s.Sweep(ctx, a, in.Session); err != nil {
-			return nil, err
-		}
-	}
 	switch in.Operation {
 	case "info":
 		mode := "installed"
@@ -180,9 +177,6 @@ func dispatch(ctx context.Context, s *store.Store, c Config, a store.Access, gid
 			return nil, api.Err("invalid_input", "ttl must be between 1 and %d seconds", c.MaxTTLSeconds)
 		}
 		r := api.Request{ID: api.ID("req_"), OwnerUID: a.UID, OwnerGID: gid, Spec: spec, Detached: in.Detached, Submitter: proc.Identity(os.Getppid()), ExpiresAt: time.Now().UTC().Add(time.Duration(ttl) * time.Second)}
-		if !r.Detached && r.Submitter.PID == 0 {
-			return nil, api.Err("process_identity", "cannot identify the submitting process")
-		}
 		return s.Create(ctx, r)
 	case "get":
 		return s.Get(ctx, in.ID, a)

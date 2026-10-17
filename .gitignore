@@ -2,7 +2,6 @@
 /dist/
 /.local/
 /licenses/
-/completions/
 /.agsudo-dev/
 /coverage.out
 __pycache__/

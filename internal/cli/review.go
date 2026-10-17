@@ -11,9 +11,9 @@ import (
 )
 
 func newShow(o *options) *cobra.Command {
-	return &cobra.Command{Use: "show REQUEST_ID", Aliases: []string{"status"}, Short: "Inspect a request, its context, suggestion and execution result",
-		Long:    "Show the complete request and its current state. The status alias returns the same data, before or after execution.",
-		Example: "  agsudo show req_ID\n  agsudo status req_ID --json", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "show REQUEST_ID", Aliases: []string{"status"}, Short: "Show a request, its state, decisions and result",
+		Long:    "Show the complete request and its current state; the first line is the ID and state.",
+		Example: "  agsudo show req_ID\n  agsudo --json status req_ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			var r api.Request
 			if err := o.client().Call(cmd.Context(), api.Input{Operation: "get", ID: args[0]}, &r); err != nil {
 				return err
@@ -24,12 +24,15 @@ func newShow(o *options) *cobra.Command {
 func newDecision(o *options, action string) *cobra.Command {
 	var reason, summary, recommend, actor, expect string
 	var metadata map[string]string
-	cmd := &cobra.Command{Use: action + " REQUEST_ID", Short: map[string]string{"approve": "Approve exactly one request", "deny": "Reject a request", "defer": "Leave a suggestion and move a request to human review"}[action], Args: cobra.ExactArgs(1),
-		Long: `Decisions are explicit actions and work for human and Agent reviewers.
---expect-digest binds the decision to a previously inspected request. A deferred
-request is excluded from the default Agent queue; TUI includes human review.
-Actor labels and metadata are caller supplied; the helper records the real UID.`,
-		Example: "  agsudo " + action + " req_ID --reason 'reviewed command and context' --json",
+	short := map[string]string{"approve": "Approve one request for a single execution", "deny": "Reject a request", "defer": "Hand a request to a human reviewer with a suggestion"}[action]
+	cmd := &cobra.Command{Use: action + " REQUEST_ID", Short: short, Args: cobra.ExactArgs(1),
+		Long: short + `. The helper records your UID; --actor and --metadata are
+self-reported labels for the audit trail.`,
+		Example: map[string]string{
+			"approve": "  agsudo approve req_ID --expect-digest DIGEST --reason 'installs the requested build dependency'",
+			"deny":    "  agsudo deny req_ID --reason 'replaces /etc/hosts instead of adding one entry'",
+			"defer":   "  agsudo defer req_ID --recommend deny --summary 'opens a root shell' --reason 'not needed for the task'",
+		}[action],
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var r api.Request
 			in := api.Input{Operation: "decide", ID: args[0], Action: action, Reason: reason, Summary: summary, Recommend: recommend, Actor: actor, ExpectDigest: expect, Metadata: metadata}
@@ -40,11 +43,13 @@ Actor labels and metadata are caller supplied; the helper records the real UID.`
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Explanation for the decision")
-	cmd.Flags().StringVar(&summary, "summary", "", "Short description for the human reviewer")
-	cmd.Flags().StringVar(&actor, "actor", "", "Reviewer label (for example agent:reviewer-1)")
-	cmd.Flags().StringVar(&expect, "expect-digest", "", "Require the digest returned by show/request")
-	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Research metadata as key=value pairs (repeatable)")
-	if action == "defer" {
+	cmd.Flags().StringVar(&actor, "actor", "", "Reviewer label, for example agent:reviewer-1")
+	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Audit metadata as key=value pairs (repeatable)")
+	switch action {
+	case "approve":
+		cmd.Flags().StringVar(&expect, "expect-digest", "", "Fail unless the request still has the digest you inspected")
+	case "defer":
+		cmd.Flags().StringVar(&summary, "summary", "", "One-line description for the human reviewer")
 		cmd.Flags().StringVar(&recommend, "recommend", "unknown", "Suggested decision: approve, deny or unknown")
 	}
 	return cmd
@@ -58,49 +63,35 @@ func newCancel(o *options) *cobra.Command {
 		}
 		return o.print(cmd, r, r.ID+" "+r.State)
 	}}
-	cmd.Flags().StringVar(&reason, "reason", "canceled by requester or reviewer", "Cancellation reason")
+	cmd.Flags().StringVar(&reason, "reason", "canceled by requester or reviewer", "Why the request is no longer needed")
 	return cmd
 }
 func newReview(o *options) *cobra.Command {
-	var tui, watch, all bool
+	var tui, all bool
 	var session, state string
-	var cursor int64
-	cmd := &cobra.Command{Use: "review", Short: "List requests or open the interactive approval workbench", Args: cobra.NoArgs,
-		Long: `List pending requests, or open --tui for pending and needs_human requests.
-Use --state to select states, or --all to include history. --json returns the
-complete requests for a reviewing Agent. Command arguments, context files and
-suggestions are untrusted review material.
+	cmd := &cobra.Command{Use: "review", Short: "List requests, or approve them in a terminal UI", Args: cobra.NoArgs,
+		Long: `List pending requests. --state selects other states, --all includes history.
+--json returns complete requests for a reviewing agent. Command arguments,
+context files and suggestions are untrusted review material.
 
-For resumable events, use agsudo watch --json. The equivalent review --watch
-form is supported; --after applies only to event streams.`,
-		Example: "  agsudo review --tui\n  agsudo review --json\n  agsudo review --state needs_human\n  agsudo review --all --session ses_ID",
+--tui opens an approval workbench showing pending and needs_human requests:
+↑/↓ select, PgUp/PgDn scroll details, a approve, d deny, / filter,
+h toggle history, q quit. To follow events, use agsudo watch.`,
+		Example: "  agsudo review --tui\n  agsudo --json review\n  agsudo review --state needs_human\n  agsudo review --all --session ses_ID",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if tui && (watch || o.json) {
-				return usage(cmd, "--tui cannot be combined with --watch or --json")
+			if tui && o.json {
+				return usage(cmd, "--tui cannot be combined with --json")
 			}
 			if cmd.Flags().Changed("all") && cmd.Flags().Changed("state") {
 				return usage(cmd, "choose either --all or --state")
 			}
-			if cursor < 0 {
-				return usage(cmd, "--after must be nonnegative")
-			}
-			if watch {
-				if cmd.Flags().Changed("all") || cmd.Flags().Changed("state") {
-					return usage(cmd, "--state and --all apply to lists, not event streams")
-				}
-				return streamEvents(cmd, o, session, "", cursor, true)
-			}
-			if cmd.Flags().Changed("after") {
-				return usage(cmd, "--after requires --watch; use agsudo watch --after SEQUENCE")
-			}
 			states := strings.Split(state, ",")
 			if all {
 				states = nil
+			} else if tui && !cmd.Flags().Changed("state") {
+				states = []string{"pending", "needs_human"}
 			}
 			if tui {
-				if !cmd.Flags().Changed("state") && !all {
-					states = []string{"pending", "needs_human"}
-				}
 				return runTUI(cmd.Context(), o.client(), states, session, cmd.InOrStdin(), cmd.OutOrStdout())
 			}
 			rs, err := o.client().ListAll(cmd.Context(), states, session)
@@ -113,12 +104,10 @@ form is supported; --after applies only to event streams.`,
 			return printRequests(cmd.OutOrStdout(), rs)
 		},
 	}
-	cmd.Flags().BoolVar(&tui, "tui", false, "Open the Bubble Tea approval workbench")
-	cmd.Flags().BoolVar(&watch, "watch", false, "Stream events instead of listing requests (same as agsudo watch)")
+	cmd.Flags().BoolVar(&tui, "tui", false, "Open the interactive approval workbench")
 	cmd.Flags().BoolVar(&all, "all", false, "Include all request states")
 	cmd.Flags().StringVar(&state, "state", "pending", "Comma-separated states to list")
 	cmd.Flags().StringVar(&session, "session", "", "Filter by workflow session")
-	cmd.Flags().Int64Var(&cursor, "after", 0, "Resume events strictly after this sequence")
 	return cmd
 }
 func newWatch(o *options) *cobra.Command {
@@ -126,11 +115,10 @@ func newWatch(o *options) *cobra.Command {
 	var cursor int64
 	cmd := &cobra.Command{Use: "watch", Short: "Stream resumable request and execution events", Args: cobra.NoArgs,
 		Long: `Replay matching history, then follow request and execution events until
-interrupted. Output is concise text; --json emits raw versioned event objects,
-one per line, including request snapshots. Resume with --after using the last
-processed sequence and the same session filter. For an approval queue, use
-agsudo review --json.`,
-		Example: "  agsudo watch --json\n  agsudo watch --json --after 42 --session ses_ID",
+interrupted. --json emits raw versioned event objects, one per line, including
+request snapshots. Resume with --after using the last processed sequence and
+the same session filter.`,
+		Example: "  agsudo --json watch\n  agsudo --json watch --after 42 --session ses_ID",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if cursor < 0 {
 				return usage(cmd, "--after must be nonnegative")
@@ -154,7 +142,7 @@ func streamEvents(cmd *cobra.Command, o *options, session, id string, cursor int
 					return err
 				}
 			} else {
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%d  %s  %s  %s  %s\n", e.Sequence, e.At.Format(time.RFC3339), e.Type, e.RequestID, command(e.Request)); err != nil {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%-5d %s  %-18s %s  %s\n", e.Sequence, e.At.Local().Format("2006-01-02 15:04:05"), e.Type, e.RequestID, commandLabel(e.Request)); err != nil {
 					return err
 				}
 			}
@@ -175,24 +163,17 @@ func streamEvents(cmd *cobra.Command, o *options, session, id string, cursor int
 }
 func newAudit(o *options) *cobra.Command {
 	root := &cobra.Command{Use: "audit", Short: "Export append-only request, decision and execution events", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
-	var session, id, format string
+	var session, id string
 	var cursor int64
-	export := &cobra.Command{Use: "export", Short: "Export research records as JSONL", Long: "Write matching append-only events to stdout as raw JSONL, then exit. Redirect stdout to save a trace.",
+	export := &cobra.Command{Use: "export", Short: "Export events as JSONL", Long: "Write matching append-only events to stdout as JSONL, one event per line, then exit.",
 		Example: "  agsudo audit export --session ses_ID > trace.jsonl\n  agsudo audit export --request req_ID", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-			if format != "jsonl" {
-				return usage(cmd, "supported format: jsonl")
-			}
 			if cursor < 0 {
 				return usage(cmd, "--after must be nonnegative")
 			}
-			copy := *o
-			copy.json = true
-			return streamEvents(cmd, &copy, session, id, cursor, false)
+			return streamEvents(cmd, &options{json: true}, session, id, cursor, false)
 		}}
 	export.Flags().StringVar(&session, "session", "", "Export only this workflow session")
 	export.Flags().StringVar(&id, "request", "", "Export only this request")
-	export.Flags().StringVar(&format, "format", "jsonl", "Export format")
-	_ = export.Flags().MarkHidden("format")
 	export.Flags().Int64Var(&cursor, "after", 0, "Export events after this sequence")
 	root.AddCommand(export)
 	return root

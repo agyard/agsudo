@@ -1,18 +1,8 @@
 # Connecting a reviewer agent
 
-Reviewers use the regular CLI. No SDK, model installation, or plugin inside
-AG-sudo is required. Run `agsudo help --reviewer` for an introduction. Put
-`--json` first in automated calls so argument parsing errors also use JSON.
-
-1. Read the pending queue with `agsudo --json review`, or subscribe with
-   `agsudo --json watch`.
-2. Run `agsudo --json show REQUEST_ID` to inspect the full command and context.
-   Use your own tools for further investigation when needed.
-3. Use `approve` when the scope is clear, `deny` when the request is disallowed,
-   or `defer` when uncertain. Include a short description, reason, and
-   recommendation for the user to review in the TUI.
-4. Supply `--expect-digest` and handle conflicts, expiration, and cancellation.
-   Do not resubmit requests to bypass these outcomes.
+Reviewers use the regular CLI; no SDK, model, or plugin inside AG-sudo is
+required. `agsudo help --reviewer` is the command reference an agent needs. This
+page adds an example policy and the trust caveats.
 
 Example instructions for a reviewer agent:
 
@@ -39,23 +29,24 @@ Example instructions for a reviewer agent:
 For example:
 
 ```bash
-agsudo --json show req_ID
 agsudo --json approve req_ID --expect-digest DIGEST \
   --actor agent:build-reviewer --reason 'Installs only the development dependencies requested by the user' \
   --metadata policy=build-v1
 
-agsudo --json defer req_ID --expect-digest DIGEST \
-  --actor agent:build-reviewer --recommend unknown \
+agsudo --json defer req_ID --actor agent:build-reviewer --recommend unknown \
   --summary 'Starts a root shell that can run arbitrary commands' \
   --reason 'The current task does not explicitly authorize an unrestricted root session'
 ```
 
-Permissions come from `reviewer_uids` in the root-owned configuration. `--actor`
+Context files are snapshots taken at submission; the command may read a newer
+version of the same path when it runs. Permissions come from `reviewer_uids` in the root-owned configuration. `--actor`
 is a self-reported label; it cannot prove that a caller sharing the same UID is a
 human or a particular model. The interface has no exclusive review claim:
 multiple reviewers can read a request, while transactions serialize final
 decisions and the first valid decision wins. Retrying the same final decision
-from the same UID does not add events.
+from the same UID does not add events. Because a human and an agent sharing a
+UID cannot be told apart, keeping deferred requests for a human is a policy the
+reviewer agent must follow, not something AG-sudo enforces.
 
 For event-driven review, send only current requests that need review to your
 agent loop. Avoid automatically reviewing a request again because of events such

@@ -81,10 +81,10 @@ agsudo exec --reason 'Verify privilege approval' -- id
 ```
 
 Select the request in the UI, press `a`, and press Enter to confirm. The waiting
-command runs as root. The UI also supports `d` to deny, `s` to defer to human
-review, `/` to filter, Tab to switch panes, `t` for events, `h` for history, and
-`q` to quit. You can inspect the requester, target, arguments, environment,
-context snapshots, and review suggestions before deciding.
+command runs as root. The UI also supports `d` to deny, `/` to filter, `h` for
+history, PgUp/PgDn to scroll details, and `q` to quit. You can inspect the
+requester, target, arguments, environment, context snapshots, and review
+suggestions before deciding.
 
 ### Connect your agent
 
@@ -96,11 +96,11 @@ agsudo integration install codex
 agsudo integration install claude
 ```
 
-**The Codex integration requires Full Access and trust for the hook in `/hooks`.**
-The installer merges user-level hook settings, preserves unrelated settings, and
-backs up the original configuration. It does not change host permissions or hook
-trust. To remove an integration, use `agsudo integration uninstall codex` or
-`agsudo integration uninstall claude`.
+**The Codex integration routes sudo only in Full Access mode and requires trust
+for the hook in `/hooks`.** The installer merges user-level hook settings and
+preserves unrelated settings. It does not change host permissions or hook trust.
+Check routing with `sudo --version` in the host. To remove an integration, use
+`agsudo integration uninstall codex` or `agsudo integration uninstall claude`.
 
 For other agents, wrap the process:
 
@@ -111,81 +111,52 @@ agsudo wrap -- bash
 ```
 
 Inside the session, `sudo` calls resolved through PATH use AG-sudo. Approval waits
-are initially silent; after about two seconds, one hint appears:
+are initially silent; after about two seconds, one hint names the request:
 
 ```text
-sudo: approval pending; see 'sudo --help'
+sudo: waiting for approval of req_3f9c2a71d04b8e65; see 'sudo --help'
 ```
 
-`sudo --help` points to the requester and reviewer guides. See the
-[integration guide](integrations/README.md) for hook behavior, tested host
-versions, and limitations.
+Ctrl-C cancels the request. If an agent's tool call times out or is killed
+instead, the request stays pending and the agent resumes it with
+`agsudo exec --request ID`. See the [integration guide](integrations/README.md)
+for hook behavior, tested host versions, and limitations.
 
 ## Agent workflows
 
-Use `agsudo COMMAND --help` or `agsudo help COMMAND` for command reference.
-The role guides describe how to work with the CLI:
+Agents learn the CLI from built-in guides; `agsudo COMMAND --help` covers each
+command:
 
 ```sh
-agsudo help --requester
-agsudo help --reviewer
+agsudo help --requester   # sudo, waiting, resuming, async requests
+agsudo help --reviewer    # review, approve, deny, defer, events
 ```
 
-### Submit without blocking
-
-`exec` waits for approval and runs a command. `request` only submits it and
-returns an ID; approval alone does not start a detached request.
+A requester can also submit without waiting and resume later:
 
 ```sh
-agsudo --json request --reason 'Restart the application' -- systemctl restart example.service
-agsudo --json status req_ID
-agsudo exec --request req_ID
-# If the request is no longer needed:
-agsudo cancel req_ID --reason 'Task changed'
+ID=$(agsudo request --reason 'Restart the application' -- systemctl restart example.service)
+agsudo status "$ID"
+agsudo exec --request "$ID"
 ```
 
-Replace `req_ID` with the returned `data.id`. Put `--json` before the subcommand
-so argument errors also use JSON. `exec` preserves the command's output and does
-not accept `--json`. Submission options must precede the command; arguments
-after the command are passed verbatim. Use repeatable `--context FILE` options
-to attach bounded UTF-8 snapshots read with the caller's permissions.
-
-A request is immutable, expires from the time of submission, and can execute
-only once. Ctrl-C while waiting cancels the attempt; after launch it reaches the
-command. `cancel` only affects requests that have not started.
-
-### Review from another agent
+A reviewing agent uses the JSON interface:
 
 ```sh
 agsudo --json review
 agsudo --json show req_ID
 agsudo --json approve req_ID --expect-digest DIGEST --reason 'Within the requested scope'
-# If human judgment is needed:
-agsudo --json defer req_ID --recommend unknown \
-  --summary 'Restart the application service' \
+agsudo --json defer req_ID --recommend unknown --summary 'Restarts a service' \
   --reason 'Confirm that interrupting active users is acceptable'
 ```
 
-Replace `DIGEST` with the digest of the request you inspected. `defer` moves the
-request to `needs_human`, removing it from the default agent queue while keeping
-it visible in the TUI and `review --state needs_human`. A waiting requester may
-start immediately after approval. Reviewers must treat arguments, attached files,
-and suggestions as untrusted evidence. See the [reviewer guide](docs/reviewer.md)
-for integration advice.
-
-### Follow and export events
-
-```sh
-agsudo --json watch --after 42
-agsudo audit export --session ses_ID > trace.jsonl
-```
-
-Events include privilege requests, context, suggestions, decisions, execution
-start/end, and exit status. Use the last processed sequence with `--after` to
-resume a stream. Ordinary commands, terminal keystrokes, and command output are
-not recorded. Traces may contain sensitive arguments or attached file contents;
-local root can modify the database. See the [protocol](docs/protocol.md) for
-schemas, states, and exit codes.
+`defer` moves a request to `needs_human` for the TUI. Events can be followed with
+`agsudo --json watch --after SEQUENCE` and exported with
+`agsudo audit export --session ses_ID > trace.jsonl`. Events include requests,
+context, suggestions, decisions, and execution results, but not ordinary
+commands, keystrokes, or output. See the [reviewer guide](docs/reviewer.md) for
+an example review policy and the [protocol](docs/protocol.md) for schemas,
+states, and exit codes.
 
 ## Security model
 
@@ -201,11 +172,11 @@ isolation against a hostile agent running under the same UID.
 - Executables are hashed at submission and checked again before execution. This
   does not freeze scripts' dependencies, configuration, or external state.
 - A shell approval covers the entire shell session; commands inside it are not
-  individually reviewed or audited. The execution environment is sanitized and
-  the default umask is `0077`.
+  individually reviewed or audited. The execution environment is sanitized and,
+  as with sudo, the umask is the caller's combined with `0022`.
 
-The sudo shim supports `-u USER`, `-n`, `-H`, `-s`/`-i` without command arguments,
-`--`, help, and version. Other sudo options fail explicitly. AG-sudo does not
+The sudo shim supports `-u USER`, `-n`, `-k`, `-H`, `-s`/`-i` without command
+arguments, `--`, help, and version. Other sudo options fail explicitly. AG-sudo does not
 implement PAM, LDAP/SSSD NSS, or full sudo compatibility. See the
 [architecture](docs/architecture.md) for the trust boundaries.
 
@@ -215,7 +186,7 @@ implement PAM, LDAP/SSSD NSS, or full sudo compatibility. See the
 git clone https://github.com/agyard/agsudo.git
 cd agsudo
 make build        # Production CLI and helper in bin/
-make check        # go vet
+make check        # gofmt, go mod tidy, go vet
 make test         # Unit tests with the race detector
 make integration  # CLI, real terminal, and containerized setuid/install tests
 ```

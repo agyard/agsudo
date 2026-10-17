@@ -15,7 +15,7 @@ import (
 )
 
 func newIntegrationCommand(o *options) *cobra.Command {
-	root := &cobra.Command{Use: "integration", Short: "Install or uninstall Agent host hooks", Args: cobra.NoArgs,
+	root := &cobra.Command{Use: "integration", Short: "Install or uninstall agent host hooks", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 	for _, action := range []string{"install", "uninstall"} {
 		command := &cobra.Command{Use: action + " <codex|claude>", Short: strings.ToUpper(action[:1]) + action[1:] + " user-level hooks, preserving other settings",
@@ -33,17 +33,19 @@ func newIntegrationCommand(o *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err = updateIntegration(path, args[0], exe, action == "install"); err != nil {
+				changed, err := updateIntegration(path, args[0], exe, action == "install")
+				if err != nil {
 					return err
 				}
-				message := action + " complete: " + path
-				if action == "install" {
-					message += "\nRestart the host to load the hooks."
-					if args[0] == "codex" {
-						message += " Review and trust the hook in Codex /hooks; it requires Full Access."
-					}
+				message := map[bool]string{true: "Installed", false: "Already installed"}[changed] + " in " + path +
+					"\nRestart the host to load the hooks, then check routing with: sudo --version"
+				if args[0] == "codex" {
+					message += "\nTrust the hook in Codex /hooks. It routes sudo only in Full Access mode."
 				}
-				return o.print(cmd, map[string]string{"host": args[0], "path": path, "action": action}, message)
+				if action == "uninstall" {
+					message = map[bool]string{true: "Uninstalled from ", false: "Not installed in "}[changed] + path
+				}
+				return o.print(cmd, map[string]any{"host": args[0], "path": path, "action": action, "changed": changed}, message)
 			}}
 		root.AddCommand(command)
 	}
@@ -166,6 +168,9 @@ func readIntegrationConfig(path string) ([]byte, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
+	if errors.Is(err, syscall.ELOOP) {
+		return nil, api.Err("configuration", "refusing to edit a symlinked config; edit its target instead: %s", path)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -187,108 +192,77 @@ func readIntegrationConfig(path string) ([]byte, error) {
 	return b, nil
 }
 
-func updateIntegration(path, host, exe string, install bool) error {
+// updateIntegration merges into the host config and atomically replaces it,
+// reporting whether anything changed.
+func updateIntegration(path, host, exe string, install bool) (bool, error) {
 	if !install {
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-			return nil
+			return false, nil
 		}
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
+		return false, err
 	}
 	st, err := os.Stat(dir)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !st.IsDir() || st.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) || st.Mode().Perm()&0022 != 0 {
-		return api.Err("configuration", "config directory must be user-owned and not writable by other users: %s", dir)
+		return false, api.Err("configuration", "config directory must be user-owned and not writable by other users: %s", dir)
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, ".agsudo.lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	original, err := readIntegrationConfig(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	root := map[string]any{}
 	if original != nil {
 		dec := json.NewDecoder(bytes.NewReader(original))
 		dec.UseNumber()
 		if err = dec.Decode(&root); err != nil {
-			return api.Err("configuration", "invalid JSON in %s: %v", path, err)
+			return false, api.Err("configuration", "invalid JSON in %s: %v", path, err)
 		}
 		if root == nil || dec.Decode(new(any)) != io.EOF {
-			return api.Err("configuration", "expected one JSON object in %s", path)
+			return false, api.Err("configuration", "expected one JSON object in %s", path)
 		}
 	}
 	before, err := json.Marshal(root)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err = editIntegration(root, host, exe, install); err != nil {
-		return err
+		return false, err
 	}
 	after, err := json.Marshal(root)
-	if err != nil {
-		return err
-	}
-	if bytes.Equal(before, after) {
-		return nil
+	if err != nil || bytes.Equal(before, after) {
+		return false, err
 	}
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
-		return err
-	}
-	if original != nil {
-		// Keep the first backup, never overwrite it or follow a backup symlink.
-		backup, err := os.OpenFile(path+".agsudo.bak", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err != nil && !errors.Is(err, os.ErrExist) {
-			return err
-		}
-		if err == nil {
-			_, err = backup.Write(original)
-			if err == nil {
-				err = backup.Sync()
-			}
-			closeErr := backup.Close()
-			if err != nil {
-				return err
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-		}
+		return false, err
 	}
 	tmp, err := os.CreateTemp(dir, ".agsudo-config-*")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(tmp.Name())
 	if _, err = tmp.Write(append(data, '\n')); err == nil {
 		err = tmp.Sync()
 	}
-	closeErr := tmp.Close()
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if closeErr != nil {
-		return closeErr
-	}
-	// A host or editor is not bound by our flock. Refuse an observed concurrent
+	// A host or editor may write concurrently. Refuse an observed concurrent
 	// edit rather than replacing it with the earlier version we merged.
 	latest, err := readIntegrationConfig(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !bytes.Equal(latest, original) {
-		return api.Err("conflict", "configuration changed during installation; retry")
+		return false, api.Err("conflict", "configuration changed during installation; retry")
 	}
-	return os.Rename(tmp.Name(), path)
+	return true, os.Rename(tmp.Name(), path)
 }

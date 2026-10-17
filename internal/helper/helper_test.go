@@ -48,7 +48,7 @@ func TestContextAndEnvironment(t *testing.T) {
 	c := defaults()
 	uid := os.Getuid()
 	name := "#" + strconv.Itoa(uid)
-	in := api.Input{Argv: []string{"id"}, User: name, Cwd: t.TempDir(), Term: "xterm-256color", Context: []api.File{{Path: "/example", Content: "data", SHA256: api.Hash([]byte("data"))}}}
+	in := api.Input{Argv: []string{"id"}, User: name, Cwd: t.TempDir(), Term: "xterm-256color", Context: []api.File{{Path: "/example", Content: "data"}}}
 	s, err := prepare(in, c, uid, os.Getgid())
 	if err != nil {
 		t.Fatal(err)
@@ -58,11 +58,11 @@ func TestContextAndEnvironment(t *testing.T) {
 			t.Fatal("unsafe inherited environment")
 		}
 	}
-	if s.Context[0].Source != "caller_supplied" {
+	if s.Context[0].Source != "caller_supplied" || s.Context[0].SHA256 != api.Hash([]byte("data")) {
 		t.Fatal("context attribution missing")
 	}
-	in.Context[0].SHA256 = "bad"
+	in.Context[0].Content = "\xff"
 	if _, err = prepare(in, c, uid, os.Getgid()); err == nil {
-		t.Fatal("context digest mismatch accepted")
+		t.Fatal("invalid UTF-8 context accepted")
 	}
 }

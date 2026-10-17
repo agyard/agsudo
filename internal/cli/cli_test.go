@@ -25,8 +25,8 @@ func TestHelpAndUsageDoNotOpenHelper(t *testing.T) {
 	for _, args := range [][]string{
 		{"nonsense"}, {"approve"}, {"exec"}, {"exec", "--bad-flag"},
 		{"help", "nonsense"}, {"help", "--requester", "review"}, {"help", "--requester", "--reviewer"},
-		{"review", "--tui", "--json"}, {"review", "--after", "42"}, {"review", "--all", "--state", "pending"},
-		{"exec", "--request", "req_x", "--", "id"}, {"exec", "--request", "", "-n", "--", "id"},
+		{"review", "--tui", "--json"}, {"review", "--watch"}, {"review", "--all", "--state", "pending"},
+		{"exec", "--request", "req_x", "--", "id"}, {"exec", "--request", "", "--", "id"}, {"exec", "-s", "-i"},
 		{"exec", "--request", "req_x", "--user", ""}, {"exec", "--request", "req_x", "--shell=false"},
 	} {
 		var out, errOut bytes.Buffer
@@ -37,13 +37,13 @@ func TestHelpAndUsageDoNotOpenHelper(t *testing.T) {
 }
 func TestSanitizeUntrustedTerminalContent(t *testing.T) {
 	in := "safe\x1b[2J\x00\r\u202e\ntext"
-	got := safe(in, false)
+	got := api.Safe(in, false)
 	for _, r := range []rune{27, 0, 13, 0x202e, 10} {
 		if strings.ContainsRune(got, r) {
 			t.Fatalf("control rune survived: %q", got)
 		}
 	}
-	if !strings.Contains(safe(in, true), "\ntext") {
+	if !strings.Contains(api.Safe(in, true), "\ntext") {
 		t.Fatal("lost file line breaks")
 	}
 }
@@ -59,6 +59,18 @@ func (f *fakeReview) Call(_ context.Context, in api.Input, out any) error {
 		*p = api.Request{ID: in.ID, State: "approved"}
 	}
 	return nil
+}
+func TestCommandQuotesOnlyWhenNeeded(t *testing.T) {
+	r := api.Request{Spec: api.Spec{Argv: []string{"dnf", "install", "-y", "a b", "it's", "", "x\x1b[2J"}}}
+	if got, want := command(r), `dnf install -y 'a b' 'it'\''s' '' $'x\x1b[2J'`; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
+func TestJSONErrorsWhereverTheFlagIs(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := Execute(context.Background(), []string{"approve", "req_x", "--bogus", "--json"}, strings.NewReader(""), &out, &errOut); code != 2 || !strings.HasPrefix(errOut.String(), `{"schema_version":1,"error":{"code":"usage"`) {
+		t.Fatalf("%d %s", code, errOut.String())
+	}
 }
 func TestTUIConfirmationPinsReviewedRequest(t *testing.T) {
 	f := &fakeReview{}

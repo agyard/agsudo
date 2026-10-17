@@ -4,11 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"github.com/agyard/agsudo/internal/api"
@@ -17,6 +16,22 @@ import (
 const DefaultHelper = "/usr/local/libexec/agsudo-helper"
 
 type Client struct{ Helper string }
+
+// New uses AGSUDO_HELPER, for development builds, or the installed helper.
+func New() Client {
+	if helper := os.Getenv("AGSUDO_HELPER"); helper != "" {
+		return Client{helper}
+	}
+	return Client{DefaultHelper}
+}
+
+func (c Client) unavailable(err error, stderr string) error {
+	message := fmt.Sprint(err)
+	if stderr = strings.TrimSpace(stderr); stderr != "" {
+		message += ": " + stderr
+	}
+	return api.Err("helper_unavailable", "helper %s: %s (install AG-sudo or set AGSUDO_HELPER for development)", c.Helper, message)
+}
 
 func (c Client) Call(ctx context.Context, in api.Input, out any) error {
 	b, err := json.Marshal(in)
@@ -34,7 +49,7 @@ func (c Client) Call(ctx context.Context, in api.Input, out any) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return api.Err("helper_unavailable", "helper %s: %v %s (install AG-sudo or set AGSUDO_HELPER for development)", c.Helper, runErr, stderr.String())
+		return c.unavailable(runErr, stderr.String())
 	}
 	if r.SchemaVersion != api.Version {
 		return api.Err("protocol_version", "incompatible helper protocol version %d", r.SchemaVersion)
@@ -51,60 +66,19 @@ func (c Client) Call(ctx context.Context, in api.Input, out any) error {
 	return nil
 }
 
-type ExitStatus struct{ Code int }
-
-func (e *ExitStatus) Error() string { return fmt.Sprintf("command exited with status %d", e.Code) }
-
-type RunOptions struct {
-	NonInteractive bool
-	Sudo           bool // Select presentation only; never changes authorization.
-}
-
-func (c Client) Run(ctx context.Context, id string, opts RunOptions, in io.Reader, out, errOut io.Writer) error {
-	r, w, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	defer w.Close()
+// Exec replaces the CLI with the helper, which waits for approval and runs the
+// command, so the terminal, signals and exit status need no relaying. It only
+// returns on failure.
+func (c Client) Exec(id string, sudo bool) error {
 	mode := "run"
-	if opts.Sudo {
+	if sudo {
 		mode = "run-sudo"
 	}
-	cmd := exec.Command(c.Helper, mode)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = in, out, errOut
-	cmd.ExtraFiles = []*os.File{r}
-	if err = cmd.Start(); err != nil {
-		return err
-	}
-	r.Close()
-	err = json.NewEncoder(w).Encode(api.Input{ID: id, NonInteractive: opts.NonInteractive})
-	w.Close()
-	if err != nil {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
-		return err
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err = <-done:
-	case <-ctx.Done():
-		_ = cmd.Process.Signal(syscall.SIGINT)
-		err = <-done
-	}
+	path, err := exec.LookPath(c.Helper)
 	if err == nil {
-		return nil
+		err = syscall.Exec(path, []string{path, mode, id}, os.Environ())
 	}
-	var e *exec.ExitError
-	if errors.As(err, &e) {
-		st := e.Sys().(syscall.WaitStatus)
-		if st.Signaled() {
-			return &ExitStatus{128 + int(st.Signal())}
-		}
-		return &ExitStatus{e.ExitCode()}
-	}
-	return err
+	return c.unavailable(err, "")
 }
 
 func (c Client) ListAll(ctx context.Context, states []string, session string) ([]api.Request, error) {

@@ -22,9 +22,24 @@ import (
 
 type reviewItem struct{ request api.Request }
 
-func (i reviewItem) Title() string { return i.request.State + "  " + command(i.request) }
+func (i reviewItem) Title() string { return i.request.State + "  " + commandLabel(i.request) }
 func (i reviewItem) Description() string {
-	return safe(i.request.Spec.Target.Name+" · "+i.request.Spec.Reason+" · "+i.request.ID, false)
+	reason := i.request.Spec.Reason
+	if reason == "" {
+		reason = "no reason given"
+	}
+	return api.Safe(i.request.Spec.Target.Name+" · "+reason+" · "+i.request.ID, false)
+}
+
+// substringFilter keeps queue order; fuzzy matching surprised reviewers.
+func substringFilter(term string, targets []string) []list.Rank {
+	var ranks []list.Rank
+	for i, target := range targets {
+		if strings.Contains(strings.ToLower(target), strings.ToLower(term)) {
+			ranks = append(ranks, list.Rank{Index: i})
+		}
+	}
+	return ranks
 }
 func (i reviewItem) FilterValue() string {
 	return command(i.request) + " " + i.request.Spec.Reason + " " + i.request.Spec.Session + " " + i.request.ID
@@ -43,11 +58,6 @@ type decided struct {
 	request api.Request
 	err     error
 }
-type traced struct {
-	id   string
-	page api.Page
-	err  error
-}
 type refreshTick struct{}
 type reviewModel struct {
 	ctx                context.Context
@@ -58,21 +68,19 @@ type reviewModel struct {
 	details            viewport.Model
 	reason             textinput.Model
 	width, height      int
-	focusDetails       bool
 	all, loading, busy bool
 	generation         int
 	selectedID         string
 	confirm            *api.Request
 	action, status     string
 	errorStatus        bool
-	traceText          string
 }
 
 func runTUI(ctx context.Context, c client.Client, states []string, session string, in io.Reader, out io.Writer) error {
 	i, iOK := in.(*os.File)
 	o, oOK := out.(*os.File)
 	if !iOK || !oOK || !term.IsTerminal(int(i.Fd())) || !term.IsTerminal(int(o.Fd())) {
-		return api.Err("terminal_required", "review --tui requires an interactive terminal; use review --json for Agents")
+		return api.Err("terminal_required", "review --tui requires an interactive terminal; agents use agsudo --json review")
 	}
 	uiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -90,11 +98,11 @@ func newReviewModel(ctx context.Context, b reviewBackend, states []string, sessi
 	l.SetStatusBarItemName("request", "requests")
 	l.DisableQuitKeybindings()
 	l.SetShowHelp(false)
+	l.Filter = substringFilter
 	v := viewport.New(viewport.WithWidth(60), viewport.WithHeight(18))
-	v.SoftWrap = true
 	input := textinput.New()
 	input.Prompt = "Reason > "
-	input.Placeholder = "Optional explanation; Enter confirms"
+	input.Placeholder = "optional · Enter confirms · Esc goes back"
 	input.CharLimit = 2048
 	input.SetWidth(65)
 	m := &reviewModel{ctx: ctx, backend: b, states: states, session: session, queue: l, details: v, reason: input, width: 110, height: 30}
@@ -123,9 +131,10 @@ func (m *reviewModel) selected() *api.Request {
 	return nil
 }
 func (m *reviewModel) layout() {
-	w, h := max(m.width-6, 20), max(m.height-8, 5)
+	// Header, subtitle, status and a two-line footer surround the panes.
+	w, h := max(m.width-6, 20), max(m.height-5, 5)
 	if m.width >= 100 {
-		left := min(48, w/2)
+		left := max(min(48, w/2), w*2/5)
 		m.queue.SetSize(left, h)
 		m.details.SetWidth(max(w-left-3, 15))
 		m.details.SetHeight(h)
@@ -149,10 +158,9 @@ func (m *reviewModel) syncDetails() {
 	}
 	if m.selectedID != r.ID {
 		m.details.GotoTop()
-		m.traceText = ""
 		m.selectedID = r.ID
 	}
-	m.details.SetContent(requestText(*r) + m.traceText)
+	m.details.SetContent(ansi.Wrap(requestText(*r), m.details.Width(), ""))
 }
 func (m *reviewModel) setError(err error) { m.status = err.Error(); m.errorStatus = true }
 
@@ -182,8 +190,9 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if r := m.selected(); r != nil {
 			oldID = r.ID
 		}
+		// Stay on the same request, or at the same position after a decision.
 		items := make([]list.Item, len(msg.requests))
-		selected := 0
+		selected := max(min(m.queue.Index(), len(items)-1), 0)
 		for i, r := range msg.requests {
 			items[i] = reviewItem{r}
 			if r.ID == oldID {
@@ -204,20 +213,6 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.errorStatus = false
 		}
 		return m, m.fetch()
-	case traced:
-		if msg.err != nil {
-			m.setError(msg.err)
-			return m, nil
-		}
-		if msg.id == m.selectedID {
-			var b strings.Builder
-			b.WriteString("\n\nRecorded events (first 200; export for full history):\n")
-			for _, e := range msg.page.Events {
-				fmt.Fprintf(&b, "%d  %s  %s  UID %d\n", e.Sequence, e.At.Local().Format("15:04:05"), e.Type, e.Actor.UID)
-			}
-			m.traceText = b.String()
-		}
-		return m, nil
 	case tea.KeyPressMsg:
 		key := msg.String()
 		if key == "ctrl+c" {
@@ -225,6 +220,12 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.busy {
 			return m, nil
+		}
+		// ↑/↓ always move in the queue; PgUp/PgDn always scroll the details.
+		if key == "pgup" || key == "pgdown" {
+			var cmd tea.Cmd
+			m.details, cmd = m.details.Update(msg)
+			return m, cmd
 		}
 		if m.confirm != nil {
 			switch key {
@@ -242,13 +243,9 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.reason.Blur()
 				return m, func() tea.Msg {
 					var out api.Request
-					err := b.Call(ctx, api.Input{Operation: "decide", ID: r.ID, Action: action, Actor: "human:tui", Reason: reason, ExpectDigest: r.Digest, Recommend: "unknown"}, &out)
+					err := b.Call(ctx, api.Input{Operation: "decide", ID: r.ID, Action: action, Actor: "human:tui", Reason: reason, ExpectDigest: r.Digest}, &out)
 					return decided{out, err}
 				}
-			case "pgup", "pgdown":
-				var cmd tea.Cmd
-				m.details, cmd = m.details.Update(msg)
-				return m, cmd
 			}
 			var cmd tea.Cmd
 			m.reason, cmd = m.reason.Update(msg)
@@ -262,9 +259,6 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "q":
 			return m, tea.Quit
-		case "tab":
-			m.focusDetails = !m.focusDetails
-			return m, nil
 		case "r":
 			if !m.loading {
 				return m, m.fetch()
@@ -274,7 +268,7 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.all = !m.all
 			m.queue.ResetFilter()
 			return m, m.fetch()
-		case "a", "d", "s":
+		case "a", "d":
 			r := m.selected()
 			if r == nil {
 				return m, nil
@@ -284,25 +278,9 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.confirm = r
-			m.action = map[string]string{"a": "approve", "d": "deny", "s": "defer"}[key]
+			m.action = map[string]string{"a": "approve", "d": "deny"}[key]
 			m.reason.SetValue("")
 			return m, m.reason.Focus()
-		case "t":
-			r := m.selected()
-			if r == nil {
-				return m, nil
-			}
-			id, b, ctx := r.ID, m.backend, m.ctx
-			return m, func() tea.Msg {
-				var p api.Page
-				err := b.Call(ctx, api.Input{Operation: "events", ID: id, Limit: 200}, &p)
-				return traced{id, p, err}
-			}
-		}
-		if m.focusDetails {
-			var cmd tea.Cmd
-			m.details, cmd = m.details.Update(msg)
-			return m, cmd
 		}
 	}
 	var cmd tea.Cmd
@@ -319,17 +297,13 @@ func (m *reviewModel) View() tea.View {
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	header := accent.Render("AG-sudo") + "  Approval workbench"
 	if m.session != "" {
-		header += " · " + safe(m.session, false)
+		header += " · " + api.Safe(m.session, false)
 	}
-	mode := "pending + selected states"
+	mode := "pending and needs_human"
 	if m.all {
-		mode = "all requests / history"
+		mode = "all requests, including history"
 	}
-	focus := "queue"
-	if m.focusDetails {
-		focus = "details"
-	}
-	sub := muted.Render(mode + " · focus: " + focus + " · refreshes automatically")
+	sub := muted.Render(mode + " · refreshes automatically")
 	var content string
 	if m.width >= 100 {
 		left := lipgloss.NewStyle().Width(m.queue.Width() + 1).Render(m.queue.View())
@@ -337,21 +311,19 @@ func (m *reviewModel) View() tea.View {
 	} else {
 		content = m.queue.View() + "\n" + m.details.View()
 	}
-	foot := "a approve · d deny · s defer · / filter · Tab focus · t trace\nh history · r refresh · ↑/↓ navigate · PgUp/PgDn scroll · q quit"
+	foot := "a approve  d deny  / filter  h history  q quit\n↑/↓ select  PgUp/PgDn details  r refresh"
 	if m.confirm != nil {
-		note := ""
+		title := strings.ToUpper(m.action) + " "
 		if m.action == "approve" && m.confirm.Spec.Scope == "shell_session" {
-			note = " · authorizes the entire shell session"
+			title += "SHELL (authorizes everything run in it) "
 		}
-		if m.action == "defer" {
-			note += " · moves to needs_human for human review"
-		}
-		foot = accent.Render(strings.ToUpper(m.action)+" "+m.confirm.ID+note) + "\n" + m.reason.View() + "\nEnter confirm · Esc back · PgUp/PgDn inspect"
+		title += command(*m.confirm)
+		foot = accent.Render(ansi.Truncate(title, m.width-4, "…")) + "\n" + m.reason.View()
 	}
 	if m.busy {
 		foot = "Saving decision…"
 	}
-	status := safe(m.status, false)
+	status := api.Safe(m.status, false)
 	if m.loading && status == "" {
 		status = "Refreshing…"
 	}

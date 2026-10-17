@@ -5,14 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/agyard/agsudo/internal/api"
-	"github.com/agyard/agsudo/internal/proc"
 	"github.com/agyard/agsudo/internal/store"
 )
 
@@ -31,88 +27,64 @@ func (u executionUI) help() string {
 	}
 	return "agsudo help --requester"
 }
-func (u executionUI) message(message string) {
+func (u executionUI) message(format string, args ...any) {
 	prefix := "agsudo"
 	if u.sudo {
 		prefix = "sudo"
 	}
-	message = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return '\uFFFD'
-		}
-		return r
-	}, message)
-	fmt.Fprintf(u.out, "%s: %s\n", prefix, message)
+	fmt.Fprintf(u.out, "%s: %s\n", prefix, api.Safe(fmt.Sprintf(format, args...), false))
 }
 
-type interrupted struct{ signal syscall.Signal }
-
-func (e *interrupted) Error() string { return "approval canceled; command was not started" }
-
-func approvalStateError(state string) error {
-	switch state {
-	case "denied":
-		return api.Err(state, "permission denied; command was not started")
-	case "expired":
-		return api.Err(state, "approval expired; command was not started")
-	case "canceled":
-		return api.Err(state, "approval canceled; command was not started")
-	default:
-		return api.Err(state, "request is %s; cannot execute again", strconv.Quote(state))
-	}
-}
-
-func waitForApproval(ctx context.Context, s *store.Store, a store.Access, in api.Input, parent api.Process, signals <-chan os.Signal, ui executionUI) error {
-	started := time.Now()
+// waitForApproval returns true once the request is approved. Otherwise it
+// reports why the command did not start and returns the exit status.
+func waitForApproval(ctx context.Context, s *store.Store, a store.Access, id string, signals <-chan os.Signal, ui executionUI) (int, bool) {
+	notice := time.After(approvalNoticeDelay)
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
-	announced := false
-	cancel := func(reason string) {
-		if _, err := s.Cancel(ctx, in.ID, a, reason); err != nil {
-			ui.message("cancellation: " + err.Error())
-		}
-	}
 	for {
-		if !proc.Alive(parent) {
-			cancel("execution client disconnected")
-			return approvalStateError("canceled")
-		}
-		select {
-		case sig := <-signals:
-			cancel("interrupted while waiting for approval")
-			return &interrupted{sig.(syscall.Signal)}
-		default:
-		}
-		r, err := s.Get(ctx, in.ID, a)
+		r, err := s.Get(ctx, id, a)
 		if err != nil {
-			return err
+			ui.message("%v", err)
+			return 1, false
 		}
 		if a.UID != r.OwnerUID && a.UID != 0 {
-			return api.Err("forbidden", "only the requester can execute this request")
+			ui.message("only the requester can execute %s", id)
+			return 1, false
 		}
-		if r.State == "approved" {
-			return nil
-		}
-		if !r.Waiting() {
-			return approvalStateError(r.State)
-		}
-		if in.NonInteractive {
-			cancel("non-interactive execution requires an existing approval")
-			return api.Err("pending", "approval required; see '%s'", ui.help())
-		}
-		// Check after fetching the state: a running command must never produce
-		// a pending-approval hint just because it takes longer than two seconds.
-		if !announced && time.Since(started) >= approvalNoticeDelay {
-			ui.message("approval pending; see '" + ui.help() + "'")
-			announced = true
+		switch r.State {
+		case "approved":
+			return 0, true
+		case "pending", "needs_human":
+		case "denied":
+			reason := "; command was not started"
+			if r.Decision != nil && r.Decision.Reason != "" {
+				reason = ": " + r.Decision.Reason
+			}
+			ui.message("%s was denied%s", id, reason)
+			return 1, false
+		case "expired", "canceled":
+			ui.message("%s was %s; command was not started", id, r.State)
+			return 1, false
+		default:
+			ui.message("%s is %s and cannot run again", id, r.State)
+			return 1, false
 		}
 		select {
 		case sig := <-signals:
-			cancel("interrupted while waiting for approval")
-			return &interrupted{sig.(syscall.Signal)}
-		case <-ctx.Done():
-			cancel("client stopped waiting")
-			return approvalStateError("canceled")
+			// A keyboard interrupt means "never mind", as at a sudo password
+			// prompt. Timeouts, hangups and kills leave the request resumable.
+			if sig == syscall.SIGINT || sig == syscall.SIGQUIT {
+				if _, err := s.Cancel(ctx, id, a, "interrupted while waiting for approval"); err != nil {
+					ui.message("cancel %s: %v", id, err)
+				} else {
+					ui.message("canceled %s; command was not started", id)
+				}
+			} else {
+				ui.message("stopped waiting; resume with: agsudo exec --request %s", id)
+			}
+			return 128 + int(sig.(syscall.Signal)), false
+		case <-notice:
+			ui.message("waiting for approval of %s; see '%s'", id, ui.help())
 		case <-tick.C:
 		}
 	}

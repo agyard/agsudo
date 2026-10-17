@@ -249,14 +249,11 @@ func TestAuditFailureRollsBackApproval(t *testing.T) {
 	}
 }
 
-func TestOnDemandExpiryAndLostSubmitter(t *testing.T) {
+func TestOnDemandExpiryAndQueueQuota(t *testing.T) {
 	s, _ := testStore(t)
 	r := create(t, s)
 	now := r.ExpiresAt
 	s.Now = func() time.Time { return now }
-	if err := s.Sweep(testContext, owner, ""); err != nil {
-		t.Fatal(err)
-	}
 	page, err := s.Events(testContext, owner, "", r.ID, 0, 200)
 	if err != nil {
 		t.Fatal(err)
@@ -264,14 +261,26 @@ func TestOnDemandExpiryAndLostSubmitter(t *testing.T) {
 	if len(page.Events) != 2 || page.Events[1].Type != "request.expired" {
 		t.Fatalf("missing expiry event: %+v", page)
 	}
+	// A vanished submitter leaves the request resumable until it expires.
 	s.Alive = func(api.Process) bool { return false }
-	r, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour), Detached: false})
+	r, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.Get(testContext, r.ID, owner)
-	if err != nil || got.State != "canceled" {
-		t.Fatalf("lost submitter not canceled: %+v %v", got, err)
+	if got, err := s.Get(testContext, r.ID, owner); err != nil || got.State != "pending" {
+		t.Fatalf("lost submitter changed state: %+v %v", got, err)
+	}
+	// Expired requests in other sessions do not count against the quota.
+	for range 255 {
+		if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Second), Spec: api.Spec{Session: "a"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour)})
+	code(t, err, "queue_full")
+	now = now.Add(time.Second)
+	if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour), Spec: api.Spec{Session: "b"}}); err != nil {
+		t.Fatal(err)
 	}
 }
 

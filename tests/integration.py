@@ -121,6 +121,25 @@ class Integration(unittest.TestCase):
         command = " ".join(req["spec"]["argv"])
         self.assertEqual(p.stdout, f"{pwd.getpwuid(os.getuid()).pw_name}|{command}|{os.getuid()}")
 
+    def test_command_umask_follows_sudo(self):
+        for caller, child in (("000", "0022"), ("027", "0027")):
+            req = self.request("sh", "-c", "umask")
+            self.approve(req)
+            p = subprocess.run(["sh", "-c", f'umask {caller}; exec "$0" exec --request "$1"', CLI, req["id"]],
+                               env=self.env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(p.stdout.strip(), child, p.stderr)
+
+    def test_terminal_interrupt_reaches_command_once(self):
+        req = self.request("python3", "-c", "import signal, time\nn = []\nsignal.signal(signal.SIGINT, lambda *_: n.append(1))\nprint('READY', flush=True)\ntime.sleep(1.5)\nprint('COUNT', len(n))")
+        self.approve(req)
+        tty = Terminal(["exec", "--request", req["id"]], self.env)
+        self.addCleanup(tty.close)
+        tty.until("READY")
+        tty.send("\x03")
+        tty.until("COUNT")
+        self.assertEqual(tty.wait(), 0)
+        self.assertIn(b"COUNT 1", tty.output)
+
     def test_cancel_expiry_and_defer(self):
         req = self.request("id")
         self.data("defer", req["id"], "--recommend", "approve", "--summary", "needs a person")
@@ -132,7 +151,8 @@ class Integration(unittest.TestCase):
         self.approve(req)
         time.sleep(1.05)
         self.assertEqual(self.data("status", req["id"])["state"], "expired")
-        self.assertEqual(self.call("exec", "--request", req["id"], check=False).returncode, 124)
+        p = self.call("exec", "--request", req["id"], check=False)
+        self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: {req['id']} was expired; command was not started\n"))
 
     def test_context_and_changed_executable(self):
         script = Path(self.temp.name) / "script"
@@ -145,8 +165,8 @@ class Integration(unittest.TestCase):
         self.approve(req)
         script.write_text("#!/bin/sh\nprintf changed\n")
         p = self.call("exec", "--request", req["id"], check=False)
-        self.assertEqual(p.returncode, 125)
-        self.assertEqual(p.stdout, "")
+        self.assertEqual((p.returncode, p.stdout), (1, ""))
+        self.assertIn("executable changed", p.stderr)
         self.assertEqual(self.data("status", req["id"])["state"], "failed")
 
     def test_shebang_and_piped_stdin(self):
@@ -192,13 +212,21 @@ class Integration(unittest.TestCase):
         p = self.process(*args)
         return p, self.pending(p)["id"]
 
-    def test_interrupt_and_disconnect(self):
-        for sig in (signal.SIGINT, signal.SIGKILL):
-            p, rid = self.start_waiting("exec", "--", "true")
+    def test_ctrl_c_cancels_but_timeouts_resume(self):
+        p, rid = self.start_waiting("exec", "--", "true")
+        p.send_signal(signal.SIGINT)
+        self.assertEqual(p.communicate(timeout=10)[1], f"agsudo: canceled {rid}; command was not started\n")
+        self.assertEqual(self.data("status", rid)["state"], "canceled")
+        self.assertNotEqual(self.call("approve", rid, check=False).returncode, 0)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            p, rid = self.start_waiting("wrap", "--", "sudo", "printf", "resumed")
             p.send_signal(sig)
-            p.communicate(timeout=10)
-            self.assertEqual(self.data("status", rid)["state"], "canceled")
-            self.assertNotEqual(self.call("approve", rid, check=False).returncode, 0)
+            _, stderr = p.communicate(timeout=10)
+            if sig == signal.SIGTERM:
+                self.assertEqual(p.returncode, 128 + sig)
+                self.assertIn(f"agsudo exec --request {rid}", stderr)
+            self.approve(self.data("status", rid))
+            self.assertEqual(self.call("exec", "--request", rid).stdout, "resumed")
 
     def test_wrap_intercepts_sudo_and_preserves_args(self):
         p, rid = self.start_waiting("wrap", "--", "sh", "-c", "sudo printf '%s' --json")
@@ -210,9 +238,9 @@ class Integration(unittest.TestCase):
         self.assertEqual((p.returncode, stdout), (0, "--json"), stderr)
 
     def test_noninteractive_and_json_usage(self):
-        p = self.call("exec", "-n", "--", "true", check=False)
-        self.assertEqual(p.returncode, 127)
-        self.assertEqual(self.data("review")["requests"], [])
+        p = self.call("wrap", "--", "sudo", "-n", "true", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(self.data("review", "--all")["requests"], [])
         p = self.call("approve", "--json", check=False)
         self.assertEqual(p.returncode, 2)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "usage")
@@ -228,15 +256,15 @@ class Integration(unittest.TestCase):
 
     def test_sudo_help_discovers_async_workflow_and_shim(self):
         p = self.call("wrap", "--", "sh", "-c", "sudo --help")
-        self.assertIn("AG-sudo workflow", p.stdout)
+        self.assertIn("agsudo exec --request", p.stdout)
         p = self.call("wrap", "--", "sh", "-c", "agsudo help --requester")
-        self.assertIn("agsudo --json request", p.stdout)
+        self.assertIn("agsudo request", p.stdout)
 
     def test_wait_hint_once_and_no_hint_during_execution(self):
         p, rid = self.start_waiting("wrap", "--", "sudo", "true")
         self.assertTrue(select.select([p.stderr], [], [], 5)[0])
         hint = p.stderr.readline()
-        self.assertEqual(hint, "sudo: approval pending; see 'sudo --help'\n")
+        self.assertEqual(hint, f"sudo: waiting for approval of {rid}; see 'sudo --help'\n")
         # No periodic notices; approval should start the original command.
         self.assertFalse(select.select([p.stderr], [], [], 2.2)[0])
         self.approve(self.data("status", rid))
@@ -272,7 +300,7 @@ class Integration(unittest.TestCase):
                     self.assertTrue(updated["command"].endswith(original))
                     command = updated["command"]
                 else:
-                    self.assertEqual(result.stdout, "")
+                    self.assertIn("sudo --help", result.stdout)
                     command = env_file.read_text() + original
                 # Execute what the host receives; the script itself contains
                 # sudo, so searching/replacing the top-level text would miss it.
@@ -306,7 +334,7 @@ class Integration(unittest.TestCase):
         self.addCleanup(tty.close)
         tty.until("TUI approval test")
         tty.send("a")
-        tty.until("Enter confirm")
+        tty.until("APPROVE id")
         tty.send("looks good\r")
         deadline = time.monotonic() + 10
         while self.data("status", req["id"])["state"] != "approved":

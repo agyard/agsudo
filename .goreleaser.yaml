@@ -38,7 +38,6 @@ archives:
       - docs/*.md
       - integrations/README.md
       - scripts/install.sh
-      - completions/*
       - licenses/**/*
       - licenses/Go-LICENSE
 

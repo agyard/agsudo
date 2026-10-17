@@ -17,9 +17,10 @@ func TestIntegrationConfigRoundTrip(t *testing.T) {
 			if err := os.WriteFile(path, original, 0600); err != nil {
 				t.Fatal(err)
 			}
-			for _, exe := range []string{"/first path/agsudo", "/first path/agsudo", "/new'path/agsudo"} {
-				if err := updateIntegration(path, host, exe, true); err != nil {
-					t.Fatal(err)
+			for i, exe := range []string{"/first path/agsudo", "/first path/agsudo", "/new'path/agsudo"} {
+				changed, err := updateIntegration(path, host, exe, true)
+				if err != nil || changed == (i == 1) {
+					t.Fatalf("install %d: changed=%v %v", i, changed, err)
 				}
 				b, err := os.ReadFile(path)
 				if err != nil {
@@ -32,14 +33,7 @@ func TestIntegrationConfigRoundTrip(t *testing.T) {
 					t.Fatalf("lost unrelated settings: %s", b)
 				}
 			}
-			backup, err := os.ReadFile(path + ".agsudo.bak")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(backup, original) {
-				t.Fatal("first backup overwritten")
-			}
-			if err := updateIntegration(path, host, "/another/agsudo", false); err != nil {
+			if _, err := updateIntegration(path, host, "/another/agsudo", false); err != nil {
 				t.Fatal(err)
 			}
 			b, err := os.ReadFile(path)
@@ -68,7 +62,7 @@ func TestIntegrationRefusesMalformedConfig(t *testing.T) {
 		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := updateIntegration(path, "codex", "/bin/agsudo", true); err == nil {
+		if _, err := updateIntegration(path, "codex", "/bin/agsudo", true); err == nil {
 			t.Fatalf("accepted %s", value)
 		}
 		b, err := os.ReadFile(path)
@@ -95,12 +89,14 @@ func TestUninstallPreservesSiblingHandlers(t *testing.T) {
 	}
 }
 
-func TestHookIgnoresOtherEventsAndProtectsPermissionModes(t *testing.T) {
+func TestHookOnlyRewritesFullAccessBash(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	for _, tc := range []struct{ event, tool, mode, decision string }{
 		{"PostToolUse", "Bash", "bypassPermissions", ""},
 		{"PreToolUse", "Write", "bypassPermissions", ""},
-		{"PreToolUse", "Bash", "plan", "deny"},
-		{"PreToolUse", "Bash", "", "deny"},
+		{"PreToolUse", "Bash", "plan", ""},
+		{"PreToolUse", "Bash", "", ""},
+		{"PreToolUse", "Bash", "bypassPermissions", "allow"},
 	} {
 		input, err := json.Marshal(map[string]any{"hook_event_name": tc.event, "tool_name": tc.tool, "permission_mode": tc.mode, "tool_input": map[string]any{"command": "sudo id"}})
 		if err != nil {
@@ -119,13 +115,22 @@ func TestHookIgnoresOtherEventsAndProtectsPermissionModes(t *testing.T) {
 		var response struct {
 			Output struct {
 				Decision string `json:"permissionDecision"`
+				Input    struct {
+					Command string `json:"command"`
+				} `json:"updatedInput"`
 			} `json:"hookSpecificOutput"`
 		}
 		if err := json.Unmarshal(out.Bytes(), &response); err != nil {
 			t.Fatal(err)
 		}
-		if response.Output.Decision != tc.decision {
-			t.Fatalf("wrong decision: %s", out.String())
+		if response.Output.Decision != tc.decision || strings.Count(response.Output.Input.Command, "\n") != 1 {
+			t.Fatalf("wrong rewrite: %s", out.String())
+		}
+		// A rewritten command is not rewritten again.
+		input, _ = json.Marshal(map[string]any{"hook_event_name": tc.event, "tool_name": tc.tool, "permission_mode": tc.mode, "tool_input": map[string]any{"command": response.Output.Input.Command}})
+		out.Reset()
+		if err := runIntegrationHook("codex", bytes.NewReader(input), &out); err != nil || out.Len() != 0 {
+			t.Fatalf("rewrote twice: %s %v", out.String(), err)
 		}
 	}
 }

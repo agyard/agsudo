@@ -85,43 +85,49 @@ PRAGMA user_version=1;`)
 }
 func (s *Store) Close() error { return s.db.Close() }
 
-// Sweep performs lifecycle housekeeping on demand, without a timer service.
-func (s *Store) Sweep(ctx context.Context, a Access, session string) error {
-	q := "SELECT id FROM requests WHERE state IN ('pending','needs_human','approved','running')"
-	var args []any
+// scope restricts a query to requests the caller may see, optionally in one session.
+func scope(a Access, session string) (string, []any) {
+	q, args := "", []any{}
 	if !a.Reviewer && a.UID != 0 {
-		q += " AND owner_uid=?"
-		args = append(args, a.UID)
+		q, args = " AND owner_uid=?", append(args, a.UID)
 	}
 	if session != "" {
-		q += " AND session=?"
-		args = append(args, session)
+		q, args = q+" AND session=?", append(args, session)
 	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	return q, args
+}
+
+func scan(ctx context.Context, c *sql.Conn, q string, args ...any) ([]api.Request, int64, error) {
+	rows, err := c.QueryContext(ctx, q, args...)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
-	var ids []string
+	defer rows.Close()
+	var rs []api.Request
+	var last int64
 	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
-			break
+		var b []byte
+		var r api.Request
+		if err = rows.Scan(&last, &b); err != nil {
+			return nil, 0, err
 		}
-		ids = append(ids, id)
+		if err = json.Unmarshal(b, &r); err != nil {
+			return nil, 0, err
+		}
+		rs = append(rs, r)
 	}
-	if err == nil {
-		err = rows.Err()
-	}
-	rows.Close()
-	if err != nil {
-		return err
-	}
-	for _, id := range ids {
-		if _, err = s.Get(ctx, id, a); err != nil {
-			return err
+	return rs, last, rows.Err()
+}
+
+// refresh performs lifecycle housekeeping on demand, without a timer service.
+func (s *Store) refresh(ctx context.Context, c *sql.Conn, filter string, args ...any) error {
+	rs, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE state IN ('pending','needs_human','approved','running')"+filter, args...)
+	for i := 0; err == nil && i < len(rs); i++ {
+		if kind := s.normalize(&rs[i]); kind != "" {
+			err = s.save(ctx, c, &rs[i], kind, lifecycle)
 		}
 	}
-	return nil
+	return err
 }
 
 // BEGIN IMMEDIATE avoids the deferred-transaction upgrade race between separate
@@ -168,6 +174,9 @@ func (s *Store) Create(ctx context.Context, r api.Request) (api.Request, error) 
 	r.SchemaVersion, r.State, r.CreatedAt = api.Version, "pending", s.Now()
 	r.Digest = api.Digest(r.Spec)
 	err := s.transaction(ctx, func(c *sql.Conn) error {
+		if err := s.refresh(ctx, c, " AND owner_uid=?", r.OwnerUID); err != nil {
+			return err
+		}
 		var count int
 		if err := c.QueryRowContext(ctx, "SELECT count(*) FROM requests WHERE owner_uid=? AND state IN ('pending','needs_human','approved')", r.OwnerUID).Scan(&count); err != nil {
 			return err
@@ -180,17 +189,12 @@ func (s *Store) Create(ctx context.Context, r api.Request) (api.Request, error) 
 	return r, err
 }
 
+var lifecycle = api.Actor{UID: 0, Label: "lifecycle"}
+
 func (s *Store) normalize(r *api.Request) string {
-	if r.Unstarted() {
-		if !s.Now().Before(r.ExpiresAt) {
-			r.State = "expired"
-			return "request.expired"
-		}
-		if !r.Detached && !s.Alive(r.Submitter) {
-			r.State = "canceled"
-			r.Failure = "submitting process disconnected"
-			return "request.canceled"
-		}
+	if r.Unstarted() && !s.Now().Before(r.ExpiresAt) {
+		r.State = "expired"
+		return "request.expired"
 	}
 	if r.State == "running" && !s.Alive(r.Executor) {
 		r.State = "unknown"
@@ -207,7 +211,7 @@ func (s *Store) change(ctx context.Context, id string, a Access, actor api.Actor
 		var b []byte
 		if err := c.QueryRowContext(ctx, "SELECT body FROM requests WHERE id=?", id).Scan(&b); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return api.Err("not_found", "request not found")
+				return api.Err("not_found", "request %s not found", id)
 			}
 			return err
 		}
@@ -215,10 +219,10 @@ func (s *Store) change(ctx context.Context, id string, a Access, actor api.Actor
 			return err
 		}
 		if !a.sees(r) {
-			return api.Err("not_found", "request not found")
+			return api.Err("not_found", "request %s not found", id)
 		}
 		if kind := s.normalize(&r); kind != "" {
-			if err := s.save(ctx, c, &r, kind, api.Actor{UID: 0, Label: "lifecycle"}); err != nil {
+			if err := s.save(ctx, c, &r, kind, lifecycle); err != nil {
 				return err
 			}
 		}
@@ -251,15 +255,16 @@ func (s *Store) Decide(ctx context.Context, id string, a Access, d api.Decision,
 	d.Actor.UID = a.UID
 	d.At = s.Now()
 	return s.change(ctx, id, a, d.Actor, func(r *api.Request) (string, error) {
-		if expect != "" && expect != r.Digest {
-			return "", api.Err("conflict", "request digest does not match the reviewed command")
-		}
 		// A repeat of the same final decision is safe and adds no duplicate event.
-		if r.Decision != nil && r.Decision.Action == d.Action && r.Decision.Actor.UID == a.UID && (r.State == "approved" || r.State == "denied") {
-			return "", nil
-		}
-		if !r.Waiting() {
+		repeat := r.Decision != nil && r.Decision.Action == d.Action && r.Decision.Actor.UID == a.UID && (r.State == "approved" || r.State == "denied")
+		if !r.Waiting() && !repeat {
 			return "", api.Err("conflict", "cannot %s request in state %s", d.Action, r.State)
+		}
+		if expect != "" && expect != r.Digest {
+			return "", api.Err("conflict", "--expect-digest does not match %s; inspect it again with agsudo show", r.ID)
+		}
+		if repeat {
+			return "", nil
 		}
 		switch d.Action {
 		case "approve":
@@ -336,98 +341,62 @@ func bounded(n int) int {
 	return min(n, 200)
 }
 func (s *Store) List(ctx context.Context, a Access, states []string, session string, cursor int64, limit int) (api.List, error) {
-	q := "SELECT rowid,id FROM requests WHERE rowid>?"
-	args := []any{cursor}
-	if !a.Reviewer && a.UID != 0 {
-		q += " AND owner_uid=?"
-		args = append(args, a.UID)
-	}
-	if session != "" {
-		q += " AND session=?"
-		args = append(args, session)
-	}
-	if len(states) > 0 {
-		q += " AND state IN (" + strings.TrimSuffix(strings.Repeat("?,", len(states)), ",") + ")"
-		for _, state := range states {
-			args = append(args, state)
-		}
-	}
-	q += " ORDER BY rowid LIMIT ?"
-	args = append(args, bounded(limit))
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return api.List{}, err
-	}
-	type row struct {
-		cursor int64
-		id     string
-	}
-	var ids []row
-	for rows.Next() {
-		var x row
-		if err = rows.Scan(&x.cursor, &x.id); err != nil {
-			break
-		}
-		ids = append(ids, x)
-	}
-	if err == nil {
-		err = rows.Err()
-	}
-	rows.Close()
-	if err != nil {
-		return api.List{}, err
-	}
+	filter, args := scope(a, session)
 	page := api.List{Requests: []api.Request{}, NextCursor: cursor}
-	for _, x := range ids {
-		r, e := s.Get(ctx, x.id, a)
-		if e != nil {
-			return page, e
+	err := s.transaction(ctx, func(c *sql.Conn) error {
+		if err := s.refresh(ctx, c, filter, args...); err != nil {
+			return err
 		}
-		page.NextCursor = x.cursor
-		if len(states) == 0 || slices.Contains(states, r.State) {
-			page.Requests = append(page.Requests, r)
+		q := "SELECT rowid,body FROM requests WHERE rowid>?" + filter
+		args := append([]any{cursor}, args...)
+		if len(states) > 0 {
+			q += " AND state IN (" + strings.TrimSuffix(strings.Repeat("?,", len(states)), ",") + ")"
+			for _, state := range states {
+				args = append(args, state)
+			}
 		}
-	}
-	return page, nil
+		rs, last, err := scan(ctx, c, q+" ORDER BY rowid LIMIT ?", append(args, bounded(limit))...)
+		if len(rs) > 0 {
+			page.Requests, page.NextCursor = rs, last
+		}
+		return err
+	})
+	return page, err
 }
+
+// Events refreshes first, so expiry and lost executions appear without a daemon.
 func (s *Store) Events(ctx context.Context, a Access, session, id string, cursor int64, limit int) (api.Page, error) {
-	q := "SELECT sequence,body FROM events WHERE sequence>?"
-	args := []any{cursor}
-	if !a.Reviewer && a.UID != 0 {
-		q += " AND owner_uid=?"
-		args = append(args, a.UID)
-	}
-	if session != "" {
-		q += " AND session=?"
-		args = append(args, session)
-	}
-	if id != "" {
-		q += " AND request_id=?"
-		args = append(args, id)
-	}
-	q += " ORDER BY sequence LIMIT ?"
-	args = append(args, bounded(limit))
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return api.Page{}, err
-	}
-	defer rows.Close()
+	filter, args := scope(a, session)
 	p := api.Page{Events: []api.Event{}, NextCursor: cursor}
-	for rows.Next() {
-		var seq int64
-		var b []byte
-		if err = rows.Scan(&seq, &b); err != nil {
-			return p, err
+	err := s.transaction(ctx, func(c *sql.Conn) error {
+		if err := s.refresh(ctx, c, filter, args...); err != nil {
+			return err
 		}
-		var e api.Event
-		if err = json.Unmarshal(b, &e); err != nil {
-			return p, err
+		q := "SELECT sequence,body FROM events WHERE sequence>?" + filter
+		args := append([]any{cursor}, args...)
+		if id != "" {
+			q, args = q+" AND request_id=?", append(args, id)
 		}
-		e.Sequence = seq
-		p.Events = append(p.Events, e)
-		p.NextCursor = seq
-	}
-	return p, rows.Err()
+		rows, err := c.QueryContext(ctx, q+" ORDER BY sequence LIMIT ?", append(args, bounded(limit))...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e api.Event
+			var b []byte
+			if err = rows.Scan(&p.NextCursor, &b); err != nil {
+				return err
+			}
+			if err = json.Unmarshal(b, &e); err != nil {
+				return err
+			}
+			e.Sequence = p.NextCursor
+			p.Events = append(p.Events, e)
+		}
+		return rows.Err()
+	})
+	return p, err
 }
 
 func ValidStates(states []string) error {

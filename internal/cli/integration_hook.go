@@ -2,17 +2,13 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/agyard/agsudo/internal/api"
 )
-
-const codexHookMarker = "# agsudo environment v1\n"
-
-var hostSessionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
 type hookEvent struct {
 	Event          string                     `json:"hook_event_name"`
@@ -23,16 +19,20 @@ type hookEvent struct {
 }
 
 func sessionLabel(host, id string) string {
-	if hostSessionPattern.MatchString(id) {
+	if id != "" && api.ValidSession(id) {
 		return id
 	}
 	return host + ":" + api.Hash([]byte(id))[:32]
 }
 
+// integrationEnvironment is one shell line, so it barely shifts line numbers
+// in the host's errors. The trailing comment also marks rewritten commands.
 func integrationEnvironment(dir, host, session string) string {
-	// Reapply the shim at the front even if a host environment manager moved it.
-	return "case \"$PATH\" in " + shellQuote(dir) + "|" + shellQuote(dir) + ":*) ;; *) export PATH=" + shellQuote(dir) + ":\"$PATH\" ;; esac\nexport AGSUDO_SESSION=" + shellQuote(sessionLabel(host, session)) + "\n"
+	return "export PATH=" + shellQuote(dir) + ":\"$PATH\" AGSUDO_SESSION=" + shellQuote(sessionLabel(host, session)) + integrationMarker(host) + "\n"
 }
+
+// Claude adds SessionStart output to the model's context.
+const sessionNotice = "sudo in this session waits for approval through AG-sudo; if a sudo call times out, see 'sudo --help' to resume it."
 
 func runIntegrationHook(host string, input io.Reader, output io.Writer) error {
 	if host != "codex" && host != "claude" {
@@ -66,7 +66,10 @@ func runIntegrationHook(host string, input io.Reader, output io.Writer) error {
 			return err
 		}
 		defer f.Close()
-		_, err = io.WriteString(f, integrationEnvironment(dir, host, event.Session))
+		if _, err = io.WriteString(f, integrationEnvironment(dir, host, event.Session)); err != nil || event.Event != "SessionStart" {
+			return err
+		}
+		_, err = fmt.Fprintln(output, sessionNotice)
 		return err
 	}
 	if event.Event != "PreToolUse" || event.Tool != "Bash" {
@@ -76,19 +79,17 @@ func runIntegrationHook(host string, input io.Reader, output io.Writer) error {
 	if err = json.Unmarshal(event.Input["command"], &command); err != nil {
 		return api.Err("invalid_input", "Bash hook requires tool_input.command")
 	}
-	if strings.HasPrefix(command, codexHookMarker) {
+	// Codex requires allow along with updatedInput. Outside Full Access, leave
+	// the command and the host's approval policy alone; sudo is not routed.
+	first, _, _ := strings.Cut(command, "\n")
+	if event.PermissionMode != "bypassPermissions" || strings.HasSuffix(first, integrationMarker(host)) {
 		return nil
-	}
-	// Codex requires allow along with updatedInput. Do not silently change an
-	// interactive/plan-mode session's tool approval policy to inject PATH.
-	if event.PermissionMode != "bypassPermissions" {
-		return codexHookResult(output, "deny", "AG-sudo's Codex hook requires Full Access. Uninstall it for other permission modes.", nil)
 	}
 	dir, err := ensureShim()
 	if err != nil {
 		return codexHookResult(output, "deny", "AG-sudo could not prepare sudo: "+err.Error(), nil)
 	}
-	preamble := codexHookMarker + integrationEnvironment(dir, host, event.Session)
+	preamble := integrationEnvironment(dir, host, event.Session)
 	// Preserve every other tool argument. The original shell parses the command
 	// after this preamble; scripts, pipelines and heredocs keep their semantics.
 	updated := make(map[string]json.RawMessage, len(event.Input))

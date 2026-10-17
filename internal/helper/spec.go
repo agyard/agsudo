@@ -17,7 +17,6 @@ import (
 	"github.com/agyard/agsudo/internal/api"
 )
 
-var sessionPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{0,128}$`)
 var termPattern = regexp.MustCompile(`^[A-Za-z0-9_.+-]{1,128}$`)
 
 func lookupUser(name string) (api.Identity, error) {
@@ -100,16 +99,14 @@ func executableFile(path string) (*os.File, string, error) {
 	return f, hex.EncodeToString(h.Sum(nil)), nil
 }
 func resolve(name, cwd, path string) (string, error) {
-	var candidates []string
-	if strings.ContainsRune(name, '/') {
-		if !filepath.IsAbs(name) {
-			name = filepath.Join(cwd, name)
-		}
-		candidates = []string{name}
-	} else {
+	candidates := []string{name}
+	if !strings.ContainsRune(name, '/') {
+		candidates = nil
 		for _, dir := range strings.Split(path, ":") {
 			candidates = append(candidates, filepath.Join(dir, name))
 		}
+	} else if !filepath.IsAbs(name) {
+		candidates = []string{filepath.Join(cwd, name)}
 	}
 	for _, p := range candidates {
 		p, err := filepath.EvalSymlinks(p)
@@ -121,16 +118,19 @@ func resolve(name, cwd, path string) (string, error) {
 			return p, nil
 		}
 	}
-	return "", api.Err("command_not_found", "executable %q not found in the configured secure PATH", name)
+	switch {
+	case strings.ContainsRune(name, '='):
+		return "", api.Err("invalid_command", "environment assignments such as %q are not supported; the environment is sanitized", name)
+	case strings.ContainsRune(name, '/'):
+		return "", api.Err("command_not_found", "%q is not an executable file", name)
+	}
+	return "", api.Err("command_not_found", "%q not found in the secure PATH %s", name, path)
 }
 
 func prepare(in api.Input, c Config, uid, gid int) (api.Spec, error) {
 	s := api.Spec{Argv: in.Argv, Cwd: in.Cwd, Reason: in.Reason, Context: in.Context, Session: in.Session, Scope: "command", Login: in.Login}
 	if !filepath.IsAbs(s.Cwd) || strings.IndexByte(s.Cwd, 0) >= 0 {
 		return s, api.Err("invalid_input", "cwd must be an absolute path")
-	}
-	if len(in.Reason) > 8192 || !sessionPattern.MatchString(in.Session) {
-		return s, api.Err("invalid_input", "invalid reason or session")
 	}
 	if in.Term != "" && !termPattern.MatchString(in.Term) {
 		return s, api.Err("invalid_input", "invalid TERM")
@@ -185,19 +185,17 @@ func prepare(in api.Input, c Config, uid, gid int) (api.Spec, error) {
 	if st, err := os.Stat(s.Cwd); err != nil || !st.IsDir() {
 		return s, api.Err("invalid_input", "cwd is not an existing directory")
 	}
-	if len(in.Context) > 8 {
-		return s, api.Err("invalid_input", "at most 8 context files")
-	}
+	// Snapshots are read by the caller; the helper never reads them as root.
 	total = 0
 	for i, f := range s.Context {
 		total += len(f.Content)
-		if !filepath.IsAbs(f.Path) || len(f.Content) > 65536 || !utf8.ValidString(f.Content) || api.Hash([]byte(f.Content)) != f.SHA256 {
-			return s, api.Err("invalid_input", "invalid context snapshot")
+		if !filepath.IsAbs(f.Path) || len(f.Content) > 64<<10 || !utf8.ValidString(f.Content) {
+			return s, api.Err("invalid_input", "context %s must be UTF-8 text of at most 64 KiB", f.Path)
 		}
-		s.Context[i].Source = "caller_supplied"
+		s.Context[i].SHA256, s.Context[i].Source = api.Hash([]byte(f.Content)), "caller_supplied"
 	}
-	if total > 256<<10 {
-		return s, api.Err("invalid_input", "context exceeds 256 KiB")
+	if len(s.Context) > 8 || total > 256<<10 {
+		return s, api.Err("invalid_input", "attach at most 8 context files, 256 KiB in total")
 	}
 	caller, err := user.LookupId(strconv.Itoa(uid))
 	if err != nil {

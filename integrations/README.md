@@ -3,24 +3,23 @@
 AG-sudo provides one integration per host, installed as user-level hooks:
 
 ```sh
-agsudo integration install codex
-agsudo integration install claude
-agsudo integration uninstall codex
-agsudo integration uninstall claude
+agsudo integration install codex     # or: claude
+agsudo integration uninstall codex   # or: claude
 ```
 
 Run these commands as a non-root user with AG-sudo installed at a stable path.
 The installer records the executable's absolute path; reinstall the integration
 after moving the binary. It creates missing configuration or merges into
-existing configuration, preserving unrelated fields and hooks. Repeated
-installation does not add duplicates. Uninstallation identifies handlers by
-their AG-sudo marker and preserves other handlers in the same group.
+existing configuration, preserving unrelated fields and hooks, and replaces the
+file atomically. Repeated installation reports "Already installed" and changes
+nothing. Uninstallation identifies handlers by their AG-sudo marker and
+preserves other handlers in the same group. Invalid JSON, unsupported hook
+structures, and symlinked configuration files produce an error without changing
+anything.
 
-Before the first change, the installer saves the original file alongside it as
-`.agsudo.bak`. Later operations do not overwrite this backup. Invalid JSON,
-unsupported hook structures, and symlinked configuration files produce an error
-without changing the original file. Installation does not mean the host has
-loaded or trusted the hook; restart the host and check its hook configuration.
+Installing does not mean the host has loaded or trusted the hook. Restart the
+host and run `sudo --version` in its shell; it prints `sudo (AG-sudo) VERSION`
+when routing works.
 
 ## Codex
 
@@ -28,52 +27,47 @@ Configuration is installed at `$CODEX_HOME/hooks.json`, or
 `~/.codex/hooks.json` when `CODEX_HOME` is unset.
 
 `PreToolUse` matches the host's normalized `Bash` tool, including Codex's
-`exec_command`. The hook prepends PATH and `AGSUDO_SESSION` settings to the
-original command and preserves other tool arguments. It does not add a nested
-shell or parse and replace sudo strings, so sudo calls made through PATH inside
+`exec_command`. The hook prepends one line that sets PATH and `AGSUDO_SESSION`
+to the original command and preserves other tool arguments. It does not add a
+nested shell or rewrite sudo strings, so sudo calls made through PATH inside
 scripts also use AG-sudo.
 
-Codex requires `permissionDecision: allow` for input rewriting. This integration
-therefore accepts only hook inputs with `permission_mode: bypassPermissions`
-(Full Access). Other modes reject the Bash call to preserve the host's approval
-expectations. The installer does not change the sandbox, approval policy, or
-hook trust. Review and trust the installed hook through Codex `/hooks`.
-
-Shells can still change PATH, define sudo functions, or invoke absolute paths;
-the integration does not cover these cases. Ordinary Bash commands receive the
-environment settings, but only actual AG-sudo calls create privilege audit
-records.
+Codex requires `permissionDecision: allow` for input rewriting, so the hook
+rewrites commands only when `permission_mode` is `bypassPermissions` (Full
+Access). In other modes it leaves commands and Codex's approval policy
+unchanged, and sudo is not routed. The installer does not change the sandbox,
+approval policy, or hook trust. Review and trust the installed hook through
+Codex `/hooks`.
 
 ## Claude Code
 
 Configuration is installed at `$CLAUDE_CONFIG_DIR/settings.json`, or
 `~/.claude/settings.json` when `CLAUDE_CONFIG_DIR` is unset.
 
-The `SessionStart` and `CwdChanged` hooks append environment settings to the
-host-provided `CLAUDE_ENV_FILE`, which Claude's Bash tool reads before running
-commands. Reapplying the settings does not duplicate the same shim at the front
-of PATH. The settings are reapplied after a working directory change. There is
-no `PermissionRequest` auto-approval hook.
+The `SessionStart` and `CwdChanged` hooks append the same PATH and
+`AGSUDO_SESSION` line to the host-provided `CLAUDE_ENV_FILE`, which Claude's
+Bash tool reads before running commands. On `SessionStart`, the hook also prints
+one sentence that Claude adds to the model's context, so the agent knows that
+sudo waits for approval and how to resume after a tool timeout. There is no
+`PermissionRequest` auto-approval hook.
 
 This integration supports local Bash execution on Linux. For remote tasks,
-install AG-sudo on the machine that runs the commands; local configuration does
-not install it remotely. Installing a hook does not lift a host sandbox's
-restriction on setuid execution.
+install AG-sudo on the machine that runs the commands. Installing a hook does
+not lift a host sandbox's restriction on setuid execution.
 
-## Sessions and diagnostics
+## Sessions and limitations
 
-Both integrations export `AGSUDO_SESSION` and make `sudo` and `agsudo` available
-through PATH. To list every request in the current session:
+Both integrations export `AGSUDO_SESSION` from the host session ID and make
+`sudo` and `agsudo` available through PATH; `agsudo help --requester` shows how
+an agent lists its session's requests. When a host times out a waiting sudo, the
+request stays pending and the agent resumes it with `agsudo exec --request ID`.
 
-```sh
-agsudo review --all --json --session "$AGSUDO_SESSION"
-```
-
+Shells can still change PATH, define sudo functions, or invoke absolute paths
+such as `/usr/bin/sudo`; the integrations do not cover these cases. Codex may
+continue with the original command after a hook error, or when a hook is disabled
+or not yet trusted, so hooks are not a security boundary against a hostile agent.
 The internal entry point `agsudo integration hook codex|claude` reads host JSON
-without using a model or network access. Hook initialization errors are reported
-to the host. Codex may continue with the original command after a general hook
-error, or when a hook is disabled or not yet trusted, so hooks are not a security
-boundary against a hostile agent.
+without using a model or network access.
 
 Documentation was checked against Codex CLI 0.162.1 and Claude Code 2.1.268.
 Repository tests exercise official event formats, the installed hook commands,

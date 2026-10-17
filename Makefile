@@ -15,9 +15,11 @@ demo: build
 	@echo 'export AGSUDO_HELPER="$(CURDIR)/bin/agsudo-helper-dev" AGSUDO_DEV_STATE="$(CURDIR)/.agsudo-dev"'
 
 test:
-	$(GO) test -race ./...
+	$(GO) test -race -count=1 ./...
 
 check:
+	@unformatted=$$(gofmt -l cmd internal); test -z "$$unformatted" || { echo "$$unformatted"; exit 1; }
+	$(GO) mod tidy -diff
 	$(GO) vet ./...
 
 integration: demo

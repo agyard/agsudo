@@ -82,7 +82,8 @@ sed -i 's/"allowed_uids": \[1000\]/"allowed_uids": [1000, 1001]/' /etc/agsudo/co
     def test_reviewer_can_approve_but_not_run_other_users_request(self):
         req = self.request("id", uid=1001)
         self.call("approve", req["id"])
-        self.assertEqual(self.call("exec", "--request", req["id"], check=False).returncode, 127)
+        p = self.call("exec", "--request", req["id"], check=False)
+        self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: only the requester can execute {req['id']}\n"))
         p = self.call("exec", "--request", req["id"], uid=1001)
         self.assertIn("uid=0(root)", p.stdout)
 
