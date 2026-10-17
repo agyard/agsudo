@@ -194,21 +194,23 @@ func (s *Store) Create(ctx context.Context, r api.Request, reuseOnly bool) (api.
 			return err
 		}
 		// Running the same command again in the same session attaches to its
-		// unused request. A new reason or context replaces a pending request,
-		// but approvals and deferrals stay; the identical request gets a recent
-		// denial again instead of asking anew.
+		// unused request or gets its recent denial again. Only a new reason or
+		// context asks anew: it replaces a pending request or answers a denial,
+		// while approvals and deferrals stay.
 		matches, _, err := scan[api.Request](ctx, tx, "SELECT rowid,body FROM requests WHERE owner_uid=? AND session=? AND command_key=? AND (state IN ('pending','needs_human','approved') OR state='denied' AND expires_at>?) ORDER BY rowid DESC",
 			r.OwnerUID, r.Spec.Session, commandKey(r.Spec), s.Now().UnixNano())
 		if err != nil {
 			return err
 		}
 		var replaced *api.Request
+		explains := !reuseOnly && (r.Spec.Reason != "" || len(r.Spec.Context) > 0)
 		for _, old := range matches {
+			same := old.Digest == r.Digest || !explains
 			switch {
-			case old.Unstarted() && (old.State != "pending" || old.Digest == r.Digest), old.State == "denied" && old.Digest == r.Digest:
+			case old.Unstarted() && (old.State != "pending" || same), old.State == "denied" && same:
 				r = old
 				return nil
-			case old.State == "pending" && !reuseOnly:
+			case old.State == "pending":
 				replaced = &old
 			}
 		}
@@ -304,7 +306,11 @@ func (s *Store) Decide(ctx context.Context, id string, a Access, d api.Decision,
 		repeat := r.Decision != nil && r.Decision.Action == d.Action && r.Decision.UID == a.UID && (r.State == "approved" || r.State == "denied")
 		switch {
 		case !r.Waiting() && !repeat:
-			return "", api.Err("conflict", "cannot %s %s: it is %s", d.Action, r.ID, r.State)
+			state := r.State
+			if r.Failure != "" {
+				state += " (" + r.Failure + ")"
+			}
+			return "", api.Err("conflict", "cannot %s %s: it is %s", d.Action, r.ID, state)
 		case check.Digest != "" && check.Digest != r.Digest:
 			return "", api.Err("conflict", "--expect-digest does not match %s; inspect it again with agsudo show", r.ID)
 		case repeat:

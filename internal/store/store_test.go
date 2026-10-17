@@ -285,7 +285,8 @@ func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	if again, err := submit(plain, false); err != nil || again.ID != r.ID {
 		t.Fatalf("same command created another request: %s %v", again.ID, err)
 	}
-	// A new reason replaces the pending request instead of duplicating it.
+	// A new reason replaces the pending request instead of duplicating it;
+	// a bare retry or sudo -n then attaches to the explained request.
 	explained := r.Spec
 	explained.Reason = "added a reason after reading the help"
 	again, err := submit(explained, false)
@@ -294,6 +295,11 @@ func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	}
 	if old, _ := s.Get(testContext, r.ID, owner); old.State != "canceled" || old.Failure != "replaced by "+again.ID {
 		t.Fatalf("replaced request still pending: %+v", old)
+	}
+	for _, reuseOnly := range []bool{false, true} {
+		if bare, err := submit(plain, reuseOnly); err != nil || bare.ID != again.ID {
+			t.Fatalf("bare retry (reuseOnly=%v) did not attach: %s %v", reuseOnly, bare.ID, err)
+		}
 	}
 	r = again
 	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Session: r.Spec.Session})
@@ -329,6 +335,9 @@ func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	revised.Reason = "answering the reviewer"
 	if again, err = submit(revised, false); err != nil || again.ID == denied.ID {
 		t.Fatalf("denial blocked a revised request: %v", err)
+	}
+	if _, err = s.Cancel(testContext, again.ID, owner, "test"); err != nil {
+		t.Fatal(err)
 	}
 	later := denied.ExpiresAt
 	s.Now = func() time.Time { return later }
