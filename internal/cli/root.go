@@ -165,11 +165,13 @@ Ctrl-C cancels the request. If the wait ends any other way (a tool timeout,
 kill or hangup), the request stays pending until it expires (10 minutes unless
 --ttl or the administrator says otherwise): ask for approval of that ID (people
 approve in agsudo review --tui), then run the same command again. It reuses the
-request, or reports its denial, instead of asking again.
+request, or reports its denial instead of asking again; adding or changing
+--reason replaces a pending request, and after a denial asks anew.
 
 --reason TEXT and repeatable --context FILE explain the request to the
-reviewer. -n fails instead of waiting and -k is ignored. Other sudo options are
-not supported; the environment is sanitized (use sudo env NAME=VALUE COMMAND).
+reviewer. -n runs an approved request but never waits or asks; -k is ignored.
+Other sudo options are not supported; the environment is sanitized (use
+sudo env NAME=VALUE COMMAND).
 
 Without waiting:
   ID=$(agsudo request --reason "why" -- COMMAND [ARGUMENTS...])
@@ -204,6 +206,6 @@ Without a terminal, approve needs the digest you inspected, deny and defer need
 request from their own AGSUDO_SESSION. Errors are JSON on stderr; conflict
 means the request's state or digest no longer allows the decision.
 
-To react to new requests, agsudo --json watch replays and then follows NDJSON
-events; resume with --after the last sequence you processed. Decide with the
-digest in the event's request snapshot.`
+To react to new requests, agsudo --json watch follows NDJSON events; resume
+with --after the last sequence you processed. Decide with the digest in the
+event's request snapshot.`

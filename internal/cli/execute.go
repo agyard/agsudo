@@ -20,10 +20,10 @@ import (
 )
 
 type executionFlags struct {
-	user, reason, session, id string
-	files                     []string
-	ttl                       time.Duration
-	shell, login              bool
+	user, reason, session, id    string
+	files                        []string
+	ttl                          time.Duration
+	shell, login, nonInteractive bool
 }
 
 func (e *executionFlags) flags(f *pflag.FlagSet) {
@@ -50,7 +50,7 @@ func (e executionFlags) input(args []string, detached bool) (api.Input, error) {
 	if err != nil {
 		return api.Input{}, err
 	}
-	in := api.Input{Operation: "create", Argv: args, Cwd: cwd, User: e.user, Reason: e.reason, Session: e.session, Term: os.Getenv("TERM"), TTLSeconds: int64(e.ttl / time.Second), Detached: detached, Shell: e.shell, Login: e.login}
+	in := api.Input{Operation: "create", Argv: args, Cwd: cwd, User: e.user, Reason: e.reason, Session: e.session, Term: os.Getenv("TERM"), TTLSeconds: int64(e.ttl / time.Second), Detached: detached, Shell: e.shell, Login: e.login, ReuseOnly: e.nonInteractive}
 	// Snapshots are read with the caller's permissions, never by the helper.
 	for _, name := range e.files {
 		path, err := filepath.Abs(name)
@@ -90,12 +90,16 @@ func (e executionFlags) create(ctx context.Context, args []string, detached bool
 }
 
 // submit creates the request unless one is being resumed, then replaces this
-// process with the helper, which waits for approval and runs it once.
+// process with the helper, which waits for approval and runs it once. Like
+// sudo -n, nonInteractive runs only an approved request and never asks.
 func submit(ctx context.Context, e executionFlags, args []string, sudo bool) error {
 	if e.id == "" {
 		r, err := e.create(ctx, args, false)
 		if err != nil {
 			return err
+		}
+		if e.nonInteractive && r.State != "approved" {
+			return api.Err("pending", "%s is %s; -n does not wait. Once it is approved, run the same command again", r.ID, r.State)
 		}
 		e.id = r.ID
 	}
@@ -247,18 +251,20 @@ func sudo(ctx context.Context, args []string, out, errOut io.Writer) int {
 	f.SetOutput(io.Discard)
 	var e executionFlags
 	e.flags(f)
-	var help, version, home, nonInteractive, reset, preserve bool
+	var help, version, home, reset bool
+	var preserve string
 	f.BoolVarP(&help, "help", "h", false, "")
 	f.BoolVarP(&version, "version", "V", false, "")
 	f.BoolVarP(&home, "set-home", "H", false, "")
-	f.BoolVarP(&nonInteractive, "non-interactive", "n", false, "")
+	f.BoolVarP(&e.nonInteractive, "non-interactive", "n", false, "")
 	f.BoolVarP(&reset, "reset-timestamp", "k", false, "")
-	f.BoolVarP(&preserve, "preserve-env", "E", false, "")
+	f.StringVarP(&preserve, "preserve-env", "E", "", "")
+	f.Lookup("preserve-env").NoOptDefVal = "all"
 	err := f.Parse(args)
 	switch {
 	case err != nil:
 		err = usage("%v", err)
-	case preserve:
+	case preserve != "":
 		err = usage("the environment is always sanitized; pass variables with: sudo env NAME=VALUE COMMAND")
 	case help:
 		fmt.Fprintln(out, requesterHelp)
@@ -266,8 +272,6 @@ func sudo(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(out, "sudo (AG-sudo)", Version)
 	case reset && len(f.Args()) == 0 && !e.shell && !e.login:
 		// There are no cached credentials to forget.
-	case nonInteractive:
-		err = api.Err("pending", "approval required; -n does not wait (submit with 'agsudo request', see 'sudo --help')")
 	default:
 		err = submit(ctx, e, f.Args(), true)
 	}

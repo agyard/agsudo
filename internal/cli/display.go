@@ -128,7 +128,7 @@ func requestText(r api.Request) string {
 	field("Reason (caller supplied)", prose(r.Spec.Reason))
 	for _, d := range []*api.Decision{r.Suggestion, r.Decision} {
 		if d != nil {
-			fmt.Fprintf(&b, "\n%s by UID %d at %s %s\n", d.Action, d.Actor.UID, when(d.At), prose(d.Actor.Label))
+			fmt.Fprintf(&b, "\n%s\n", strings.TrimSpace(fmt.Sprintf("%s by UID %d at %s %s", d.Action, d.Actor.UID, when(d.At), prose(d.Actor.Label))))
 			field("From session", d.Session)
 			field("Summary", prose(d.Summary))
 			field("Reason", prose(d.Reason))

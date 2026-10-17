@@ -17,6 +17,7 @@ import (
 const Version = 1
 const MaxMessage = 1024 * 1024
 const MaxContextFile = 64 << 10
+const PageLimit = 200
 
 type Error struct {
 	Code    string `json:"code"`
@@ -172,6 +173,7 @@ type Input struct {
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	ExpectDigest string            `json:"expect_digest,omitempty"`
 	PendingOnly  bool              `json:"pending_only,omitempty"`
+	ReuseOnly    bool              `json:"reuse_only,omitempty"`
 	States       []string          `json:"states,omitempty"`
 	Cursor       int64             `json:"cursor,omitempty"`
 	Limit        int               `json:"limit,omitempty"`

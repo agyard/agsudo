@@ -34,7 +34,7 @@ func interrupt(ctx context.Context, s *store.Store, a store.Access, r api.Reques
 	case r.State == "approved":
 		ui.message("stopped before starting %s; it is still approved, so run the same command again to run it.", r.ID)
 	default:
-		ui.message("stopped waiting; %s stays pending until it expires. Once it is approved (agsudo review --tui), run the same command again.", r.ID)
+		ui.message("stopped waiting; %s awaits approval until it expires. Once it is approved (agsudo review --tui), run the same command again.", r.ID)
 	}
 	return 128 + int(sig.(syscall.Signal))
 }

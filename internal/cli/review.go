@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -32,9 +33,11 @@ func newDecision(o *options, action string) *cobra.Command {
 	var metadata map[string]string
 	short := map[string]string{"approve": "Approve one request for a single execution", "deny": "Reject a request", "defer": "Hand a request to a human reviewer with a suggestion"}[action]
 	cmd := &cobra.Command{Use: action + " REQUEST_ID", Short: short, Args: cobra.ExactArgs(1),
-		Long: short + `. The helper records your UID and session; --actor and
---metadata are self-reported labels. Without a terminal, extra guardrails
-apply; see agsudo help --reviewer.`,
+		Long: short + `.
+
+The helper records your UID and session; --actor and --metadata are
+self-reported labels. At a terminal, approve shows the request and asks for
+confirmation. Without one, other guardrails apply; see agsudo help --reviewer.`,
 		Example: map[string]string{
 			"approve": "  agsudo approve req_ID --expect-digest DIGEST --reason 'installs the requested build dependency'",
 			"deny":    "  agsudo deny req_ID --reason 'replaces /etc/hosts instead of adding one entry'",
@@ -47,6 +50,13 @@ apply; see agsudo help --reviewer.`,
 			}
 			if scripted && action != "approve" && reason == "" {
 				return usage("%s without a terminal requires --reason, so the requester or person knows why", action)
+			}
+			if action == "approve" && !scripted && expect == "" {
+				digest, err := confirmApproval(cmd, args[0])
+				if err != nil {
+					return err
+				}
+				expect = digest
 			}
 			var r api.Request
 			in := api.Input{Operation: "decide", ID: args[0], Action: action, Reason: reason, Summary: summary, Recommend: recommend, Actor: actor, ExpectDigest: expect, Metadata: metadata,
@@ -69,6 +79,25 @@ apply; see agsudo help --reviewer.`,
 	}
 	return cmd
 }
+
+// confirmApproval shows a person the request before approving it and returns
+// the digest of what they saw.
+func confirmApproval(cmd *cobra.Command, id string) (string, error) {
+	var r api.Request
+	if err := client.New().Call(cmd.Context(), api.Input{Operation: "get", ID: id}, &r); err != nil {
+		return "", err
+	}
+	text := requestText(r)
+	if width := terminalWidth(cmd.OutOrStdout()); width > 0 {
+		text = wrap(text, width)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s\n\nApprove %s? [y/N] ", text, r.ID)
+	answer, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	if !strings.EqualFold(strings.TrimSpace(answer), "y") {
+		return "", api.Err("aborted", "%s was not approved", r.ID)
+	}
+	return r.Digest, nil
+}
 func newCancel(o *options) *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{Use: "cancel REQUEST_ID", Short: "Cancel a request before execution starts", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -85,7 +114,8 @@ func newReview(o *options) *cobra.Command {
 	var tui, all bool
 	var session, state string
 	cmd := &cobra.Command{Use: "review", Short: "List requests, or approve them in a terminal UI", Args: cobra.NoArgs,
-		Long: `List pending requests. --state selects other states, --all includes history.
+		Long: `List requests awaiting a decision: pending ones, and at a terminal also
+needs_human ones. --state selects other states, --all includes history.
 --json returns complete requests for a reviewing agent. Command arguments,
 context files and suggestions are untrusted review material.
 
@@ -100,10 +130,11 @@ h toggle history, r refresh, q quit. To follow events, use agsudo watch.`,
 			if cmd.Flags().Changed("all") && cmd.Flags().Changed("state") {
 				return usage("choose either --all or --state")
 			}
+			// People see what awaits them; scripts see what they may decide.
 			states := strings.Split(state, ",")
 			if all {
 				states = nil
-			} else if tui && !cmd.Flags().Changed("state") {
+			} else if !cmd.Flags().Changed("state") && (tui || !o.json && isTerminal(cmd.InOrStdin())) {
 				states = []string{"pending", "needs_human"}
 			}
 			if tui {
@@ -129,22 +160,22 @@ func newWatch(o *options) *cobra.Command {
 	var session string
 	var cursor int64
 	cmd := &cobra.Command{Use: "watch", Short: "Stream resumable request and execution events", Args: cobra.NoArgs,
-		Long: `Replay matching history, then follow request and execution events until
-interrupted. --json emits raw versioned event objects, one per line, including
-request snapshots. Resume with --after using the last processed sequence and
-the same session filter.`,
+		Long: `Follow new request and execution events until interrupted. --json emits raw
+versioned event objects, one per line, including request snapshots. --after
+replays history after a sequence first: resume with the last processed sequence
+and the same session filter, or use --after 0 for everything.`,
 		Example: "  agsudo --json watch\n  agsudo --json watch --after 42 --session ses_ID",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return streamEvents(cmd, o.json, session, "", cursor, true)
 		},
 	}
 	cmd.Flags().StringVar(&session, "session", "", "Filter by workflow session")
-	cmd.Flags().Int64Var(&cursor, "after", 0, "Resume events strictly after this sequence")
+	cmd.Flags().Int64Var(&cursor, "after", -1, "Replay events after this sequence first (default: only new events)")
 	return cmd
 }
 func streamEvents(cmd *cobra.Command, jsonOut bool, session, id string, cursor int64, follow bool) error {
-	if cursor < 0 {
-		return usage("--after must be nonnegative")
+	if cursor < -1 {
+		return usage("--after must be a sequence number")
 	}
 	for {
 		var p api.Page

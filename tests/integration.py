@@ -226,7 +226,7 @@ class Integration(unittest.TestCase):
             os.killpg(p.pid, sig)
             _, stderr = p.communicate(timeout=10)
             if sig == signal.SIGTERM:
-                self.assertIn(f"{rid} stays pending", stderr)
+                self.assertIn(f"{rid} awaits approval", stderr)
             self.approve(self.data("status", rid))
             # Running the same command again reuses the request, pipe included.
             again = self.call("wrap", "--session", "host", "--", "sh", "-c", piped)
@@ -254,9 +254,11 @@ class Integration(unittest.TestCase):
         self.data("defer", req["id"], "--reason", "unsure")
         p = self.call("approve", req["id"], "--expect-digest", req["digest"], check=False)
         self.assertIn("deferred to a person", p.stderr)
-        # A person at a terminal decides needs_human requests.
+        # A person at a terminal sees the request, confirms, and decides it.
         tty = Terminal(["approve", req["id"]], self.env)
         self.addCleanup(tty.close)
+        tty.until(f"Approve {req['id']}? [y/N]")
+        tty.send("y\r")
         tty.until(f"{req['id']} approved")
         self.assertEqual(tty.wait(), 0)
 
@@ -264,6 +266,9 @@ class Integration(unittest.TestCase):
         p = self.call("wrap", "--", "sudo", "-n", "true", check=False)
         self.assertEqual(p.returncode, 1)
         self.assertEqual(self.data("review", "--all")["requests"], [])
+        # Like sudo -n, an existing approval runs without waiting.
+        self.approve(self.request("printf", "ok", options=("--session", "n")))
+        self.assertEqual(self.call("wrap", "--session", "n", "--", "sudo", "-n", "printf", "ok").stdout, "ok")
         p = self.call("approve", "--json", check=False)
         self.assertEqual(p.returncode, 2)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "usage")
@@ -329,7 +334,7 @@ class Integration(unittest.TestCase):
                 self.call("integration", "uninstall", host)
 
     def test_live_event_stream_and_resume(self):
-        p = self.process("watch", "--json")
+        p = self.process("watch", "--json", "--after", "0")
         req = self.request("true")
         self.assertTrue(select.select([p.stdout], [], [], 10)[0])
         event = json.loads(p.stdout.readline())

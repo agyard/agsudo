@@ -176,7 +176,9 @@ func (s *Store) save(ctx context.Context, c *sql.Conn, r *api.Request, kind stri
 	return err
 }
 
-func (s *Store) Create(ctx context.Context, r api.Request) (api.Request, error) {
+// Create submits a request. With reuseOnly it returns an existing request or
+// fails, so sudo -n never asks for a new approval.
+func (s *Store) Create(ctx context.Context, r api.Request, reuseOnly bool) (api.Request, error) {
 	r.SchemaVersion, r.State, r.CreatedAt = api.Version, "pending", s.Now()
 	r.Digest = api.Digest(r.Spec)
 	err := s.transaction(ctx, func(c *sql.Conn) error {
@@ -188,22 +190,38 @@ func (s *Store) Create(ctx context.Context, r api.Request) (api.Request, error) 
 		if err != nil {
 			return err
 		}
-		// Running the same command again in the same session, whatever its
-		// reason or context, attaches to its unused request instead of adding
-		// one, and gets a recent denial again instead of asking anew.
+		// Running the same command again in the same session attaches to its
+		// unused request. A new reason or context replaces a pending request,
+		// but approvals and deferrals stay; the identical request gets a recent
+		// denial again instead of asking anew.
 		count, key := 0, commandKey(r.Spec)
+		var replaced *api.Request
 		for _, old := range append(rs, denied...) {
-			reusable := old.Unstarted() || old.State == "denied" && s.Now().Before(old.ExpiresAt)
-			if reusable && old.Spec.Session == r.Spec.Session && commandKey(old.Spec) == key {
+			same := old.Spec.Session == r.Spec.Session && commandKey(old.Spec) == key
+			switch {
+			case same && old.Unstarted() && (old.State != "pending" || old.Digest == r.Digest),
+				same && old.State == "denied" && old.Digest == r.Digest && s.Now().Before(old.ExpiresAt):
 				r = old
 				return nil
+			case same && old.State == "pending" && !reuseOnly:
+				replaced = &old
+				continue
 			}
 			if old.Unstarted() {
 				count++
 			}
 		}
+		if reuseOnly {
+			return api.Err("pending", "approval required; run the command without -n to ask for it")
+		}
 		if count >= 256 {
 			return api.Err("queue_full", "at most 256 unconsumed requests per user; list and cancel stale requests")
+		}
+		if replaced != nil {
+			replaced.State, replaced.Failure = "canceled", "replaced by "+r.ID
+			if err := s.save(ctx, c, replaced, "request.canceled", api.Actor{UID: r.OwnerUID}); err != nil {
+				return err
+			}
 		}
 		return s.save(ctx, c, &r, "request.created", api.Actor{UID: r.OwnerUID})
 	})
@@ -369,7 +387,7 @@ func bounded(n int) int {
 	if n <= 0 {
 		return 50
 	}
-	return min(n, 200)
+	return min(n, api.PageLimit)
 }
 func (s *Store) List(ctx context.Context, a Access, states []string, session string, cursor int64, limit int) (api.List, error) {
 	filter, args := scope(a, session)
@@ -395,13 +413,17 @@ func (s *Store) List(ctx context.Context, a Access, states []string, session str
 	return page, err
 }
 
-// Events refreshes first, so expiry and lost executions appear without a daemon.
+// Events refreshes first, so expiry and lost executions appear without a
+// daemon. Cursor -1 starts after the latest event.
 func (s *Store) Events(ctx context.Context, a Access, session, id string, cursor int64, limit int) (api.Page, error) {
 	filter, args := scope(a, session)
 	p := api.Page{Events: []api.Event{}, NextCursor: cursor}
 	err := s.transaction(ctx, func(c *sql.Conn) error {
 		if _, err := s.refresh(ctx, c, filter, args...); err != nil {
 			return err
+		}
+		if cursor < 0 {
+			return c.QueryRowContext(ctx, "SELECT coalesce(max(sequence),0) FROM events").Scan(&p.NextCursor)
 		}
 		q := "SELECT sequence,body FROM events WHERE sequence>?" + filter
 		args := append([]any{cursor}, args...)

@@ -46,7 +46,7 @@ stateDiagram-v2
     running --> unknown: monitor disappeared
 ```
 
-Approval never starts a command by itself. A waiting `sudo` or `agsudo exec` starts it; otherwise the requester runs `agsudo exec --request ID`, at most once. Ctrl-C (SIGINT or SIGQUIT) while waiting cancels the request. Any other end of a wait — SIGTERM, SIGHUP, SIGKILL — leaves the request as it is until it expires. Submitting a command that matches one of the owner's unused (pending, needs_human or approved) requests — same spec and session, ignoring reason and context — returns that request instead of creating another, so running the same command again resumes it. A match denied within its TTL is returned as well, so the denial is reported instead of asking again.
+Approval never starts a command by itself. A waiting `sudo` or `agsudo exec` starts it; otherwise the requester runs `agsudo exec --request ID`, at most once. Ctrl-C (SIGINT or SIGQUIT) while waiting cancels the request. Any other end of a wait — SIGTERM, SIGHUP, SIGKILL — leaves the request as it is until it expires. Submitting a command that matches one of the owner's unused requests — same spec and session, ignoring reason and context — returns that request instead of creating another, so running the same command again resumes it. If the reason or context differs, a pending match is canceled ("replaced by" the new request) while approved and needs_human matches are still returned. An identical request denied within its TTL is returned, so the denial is reported instead of asking again. `sudo -n` sets `reuse_only`: it runs an approved match and never creates a request.
 
 `running` starts with consuming the grant, before spawning the program. `command_pid` appears after successful spawn. Thus a crash during launch can become `unknown`, even if the program never started. Never retry such a grant automatically.
 
@@ -64,7 +64,7 @@ No always-on process is necessary: lifecycle checks run during queries, decision
 
 Examples abbreviate the request snapshot. Event types are `request.created`, `request.approved`, `request.denied`, `request.deferred`, `request.canceled`, `request.expired`, `execution.claimed`, `execution.started`, `execution.exited`, `execution.failed` and `execution.lost`.
 
-Sequences are global and monotonically increasing; a filtered user's stream may have gaps. Resume with `--after` using the last processed sequence, keeping the same filters. Events replay existing history first, then follow new events. Handle replay idempotently. No output or keystrokes are stored.
+Sequences are global and monotonically increasing; a filtered user's stream may have gaps. `watch` follows new events; with `--after` it first replays history after that sequence (`--after 0` for everything), and `audit export` writes history and exits. Resume with the last processed sequence, keeping the same filters, and handle replay idempotently. No output or keystrokes are stored.
 
 ## Exit status and errors
 

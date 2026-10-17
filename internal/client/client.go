@@ -86,11 +86,11 @@ func (c Client) ListAll(ctx context.Context, states []string, session string) ([
 	var cursor int64
 	for {
 		var page api.List
-		if err := c.Call(ctx, api.Input{Operation: "list", States: states, Session: session, Cursor: cursor, Limit: 200}, &page); err != nil {
+		if err := c.Call(ctx, api.Input{Operation: "list", States: states, Session: session, Cursor: cursor, Limit: api.PageLimit}, &page); err != nil {
 			return nil, err
 		}
 		all = append(all, page.Requests...)
-		if len(page.Requests) < 200 {
+		if len(page.Requests) < api.PageLimit {
 			break
 		}
 		cursor = page.NextCursor

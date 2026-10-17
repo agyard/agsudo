@@ -27,7 +27,7 @@ func testStore(t *testing.T) (*Store, string) {
 }
 func create(t *testing.T, s *Store) api.Request {
 	t.Helper()
-	r, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: s.Now().Add(time.Hour), Spec: api.Spec{Argv: []string{"id", api.ID("")}, Session: "test-session"}})
+	r, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: s.Now().Add(time.Hour), Spec: api.Spec{Argv: []string{"id", api.ID("")}, Session: "test-session"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestConcurrentFirstOpen(t *testing.T) {
 				return
 			}
 			defer s.Close()
-			_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: time.Now().Add(time.Minute), Spec: api.Spec{Argv: []string{api.ID("")}}})
+			_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: time.Now().Add(time.Minute), Spec: api.Spec{Argv: []string{api.ID("")}}}, false)
 			results <- err
 		}()
 	}
@@ -263,27 +263,39 @@ func TestOnDemandExpiryAndQueueQuota(t *testing.T) {
 	}
 	// Expired requests in other sessions do not count against the quota.
 	for range 256 {
-		if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Second), Spec: api.Spec{Argv: []string{api.ID("")}, Session: "a"}}); err != nil {
+		if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Second), Spec: api.Spec{Argv: []string{api.ID("")}, Session: "a"}}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour), Spec: api.Spec{Argv: []string{"another"}}})
+	_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour), Spec: api.Spec{Argv: []string{"another"}}}, false)
 	code(t, err, "queue_full")
 	now = now.Add(time.Second)
-	if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour), Spec: api.Spec{Session: "b"}}); err != nil {
+	if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour), Spec: api.Spec{Session: "b"}}, false); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	s, _ := testStore(t)
+	submit := func(spec api.Spec, reuseOnly bool) (api.Request, error) {
+		return s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: spec}, reuseOnly)
+	}
 	r := create(t, s)
-	explained := r.Spec
-	explained.Reason = "added a reason after reading the help"
-	again, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: explained})
-	if err != nil || again.ID != r.ID {
+	plain := r.Spec
+	if again, err := submit(plain, false); err != nil || again.ID != r.ID {
 		t.Fatalf("same command created another request: %s %v", again.ID, err)
 	}
+	// A new reason replaces the pending request instead of duplicating it.
+	explained := r.Spec
+	explained.Reason = "added a reason after reading the help"
+	again, err := submit(explained, false)
+	if err != nil || again.ID == r.ID {
+		t.Fatalf("new reason was dropped: %v", err)
+	}
+	if old, _ := s.Get(testContext, r.ID, owner); old.State != "canceled" || old.Failure != "replaced by "+again.ID {
+		t.Fatalf("replaced request still pending: %+v", old)
+	}
+	r = again
 	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Session: r.Spec.Session})
 	code(t, err, "forbidden")
 	if _, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "defer"}, Check{}); err != nil {
@@ -292,23 +304,35 @@ func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{PendingOnly: true})
 	code(t, err, "conflict")
 	r = approve(t, s, r)
+	// An approval is reused whatever the reason, also without creating.
+	if again, err = submit(plain, true); err != nil || again.ID != r.ID {
+		t.Fatalf("approval not reused: %v", err)
+	}
 	if _, err = s.ClaimExecution(testContext, r.ID, owner, api.Process{PID: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if again, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: r.Spec}); err != nil || again.ID == r.ID {
+	_, err = submit(r.Spec, true)
+	code(t, err, "pending")
+	if again, err = submit(r.Spec, false); err != nil || again.ID == r.ID {
 		t.Fatalf("a used request was reused: %v", err)
 	}
-	// A recent denial is reported again; after its deadline, a new request.
+	// The identical request gets a recent denial again; a revised reason or a
+	// later attempt asks anew.
 	denied := create(t, s)
 	if _, err = s.Decide(testContext, denied.ID, owner, api.Decision{Action: "deny"}, Check{}); err != nil {
 		t.Fatal(err)
 	}
-	if again, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: denied.Spec}); err != nil || again.ID != denied.ID || again.State != "denied" {
+	if again, err = submit(denied.Spec, false); err != nil || again.ID != denied.ID || again.State != "denied" {
 		t.Fatalf("denial not reported: %+v %v", again, err)
+	}
+	revised := denied.Spec
+	revised.Reason = "answering the reviewer"
+	if again, err = submit(revised, false); err != nil || again.ID == denied.ID {
+		t.Fatalf("denial blocked a revised request: %v", err)
 	}
 	later := denied.ExpiresAt
 	s.Now = func() time.Time { return later }
-	if again, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: later.Add(time.Hour), Spec: denied.Spec}); err != nil || again.ID == denied.ID {
+	if again, err = submit(denied.Spec, false); err != nil || again.ID == denied.ID {
 		t.Fatalf("old denial blocked a new request: %v", err)
 	}
 }

@@ -338,8 +338,8 @@ func (m *reviewModel) View() tea.View {
 		foot = "Saving decision…"
 	}
 	status := api.Safe(m.status, false)
-	if m.loading && status == "" {
-		status = "Refreshing…"
+	if more := m.details.TotalLineCount() - m.details.YOffset() - m.details.Height(); status == "" && more > 0 {
+		status = fmt.Sprintf("↓ %d more lines of details (PgDn)", more)
 	}
 	style := muted
 	if m.errorStatus {

@@ -58,7 +58,7 @@ func decode(r io.Reader) (api.Input, error) {
 	if d.Decode(new(any)) != io.EOF {
 		return in, api.Err("invalid_input", "trailing protocol data")
 	}
-	if len(in.Actor) > 128 || len(in.Reason) > 8192 || len(in.Summary) > 8192 || len(in.Metadata) > 32 || in.Cursor < 0 || in.Limit < 0 {
+	if len(in.Actor) > 128 || len(in.Reason) > 8192 || len(in.Summary) > 8192 || len(in.Metadata) > 32 || in.Cursor < -1 || in.Limit < 0 {
 		return in, api.Err("invalid_input", "invalid request fields")
 	}
 	for k, v := range in.Metadata {
@@ -180,7 +180,7 @@ func dispatch(ctx context.Context, s *store.Store, c Config, a store.Access, gid
 			return nil, api.Err("invalid_input", "ttl must be between 1 and %d seconds", c.MaxTTLSeconds)
 		}
 		r := api.Request{ID: api.ID("req_"), OwnerUID: a.UID, OwnerGID: gid, Spec: spec, Detached: in.Detached, Submitter: proc.Identity(os.Getppid()), ExpiresAt: time.Now().UTC().Add(time.Duration(ttl) * time.Second)}
-		return s.Create(ctx, r)
+		return s.Create(ctx, r, in.ReuseOnly)
 	case "get":
 		return s.Get(ctx, in.ID, a)
 	case "list":
