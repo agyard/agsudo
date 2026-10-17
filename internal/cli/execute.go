@@ -20,7 +20,7 @@ import (
 )
 
 type executionFlags struct {
-	user, reason, session, id    string
+	user, reason, session        string
 	files                        []string
 	ttl                          time.Duration
 	shell, login, nonInteractive bool
@@ -36,120 +36,91 @@ func (e *executionFlags) flags(f *pflag.FlagSet) {
 	f.BoolVarP(&e.shell, "shell", "s", false, "Request the target user's interactive shell")
 	f.BoolVarP(&e.login, "login", "i", false, "Request a login shell in the target user's home")
 }
-func (e executionFlags) input(args []string, detached bool) (api.Input, error) {
-	if e.shell && e.login {
-		return api.Input{}, api.Err("usage", "choose either --shell or --login")
-	}
-	if len(args) == 0 && !e.shell && !e.login {
-		return api.Input{}, api.Err("usage", "a command, -s/--shell or -i/--login is required")
-	}
-	if e.ttl < 0 || (e.ttl > 0 && e.ttl < time.Second) {
-		return api.Input{}, api.Err("usage", "ttl must be at least one second")
+
+// create submits a request, or returns the matching one already submitted.
+func (e executionFlags) create(ctx context.Context, args []string) (api.Request, error) {
+	var r api.Request
+	switch {
+	case e.shell && e.login:
+		return r, usage("choose either --shell or --login")
+	case len(args) == 0 && !e.shell && !e.login:
+		return r, usage("a command, -s/--shell or -i/--login is required")
+	case e.ttl < 0 || (e.ttl > 0 && e.ttl < time.Second):
+		return r, usage("ttl must be at least one second")
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return api.Input{}, err
+		return r, err
 	}
-	in := api.Input{Operation: "create", Argv: args, Cwd: cwd, User: e.user, Reason: e.reason, Session: e.session, Term: os.Getenv("TERM"), TTLSeconds: int64(e.ttl / time.Second), Detached: detached, Shell: e.shell, Login: e.login, ReuseOnly: e.nonInteractive}
+	in := api.Input{Operation: "create", Argv: args, Cwd: cwd, User: e.user, Reason: e.reason, Session: e.session, TTLSeconds: int64(e.ttl / time.Second), Shell: e.shell, Login: e.login, ReuseOnly: e.nonInteractive}
 	// Snapshots are read with the caller's permissions, never by the helper.
 	for _, name := range e.files {
 		path, err := filepath.Abs(name)
 		if err != nil {
-			return in, err
+			return r, err
 		}
 		f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
-			return in, err
+			return r, err
 		}
 		st, err := f.Stat()
 		var b []byte
 		if err == nil && !st.Mode().IsRegular() {
-			err = api.Err("usage", "context must be a regular file: %s", name)
+			err = usage("context must be a regular file: %s", name)
 		} else if err == nil {
 			b, err = io.ReadAll(io.LimitReader(f, api.MaxContextFile+1))
 		}
 		f.Close()
 		if err != nil {
-			return in, err
+			return r, err
 		}
 		if len(b) > api.MaxContextFile || !utf8.Valid(b) {
-			return in, api.Err("usage", "context must be UTF-8 text of at most 64 KiB: %s", name)
+			return r, usage("context must be UTF-8 text of at most 64 KiB: %s", name)
 		}
 		in.Context = append(in.Context, api.File{Path: path, Content: string(b)})
 	}
-	return in, nil
-}
-
-func (e executionFlags) create(ctx context.Context, args []string, detached bool) (api.Request, error) {
-	in, err := e.input(args, detached)
-	var r api.Request
-	if err == nil {
-		err = client.New().Call(ctx, in, &r)
-	}
+	err = client.New().Call(ctx, in, &r)
 	return r, err
 }
 
-// submit creates the request unless one is being resumed, then replaces this
-// process with the helper, which waits for approval and runs it once. Like
-// sudo -n, nonInteractive runs only an approved request and never asks.
+// submit creates or reuses the request, then replaces this process with the
+// helper, which waits for approval and runs it once. Like sudo -n,
+// nonInteractive runs only an approved request and never asks.
 func submit(ctx context.Context, e executionFlags, args []string, sudo bool) error {
-	if e.id == "" {
-		r, err := e.create(ctx, args, false)
-		if err != nil {
-			return err
-		}
-		if e.nonInteractive && r.Waiting() {
-			return api.Err("pending", "%s is %s; -n does not wait. Once it is approved, run the same command again", r.ID, r.State)
-		}
-		e.id = r.ID
+	r, err := e.create(ctx, args)
+	if err != nil {
+		return err
 	}
-	return client.New().Exec(e.id, sudo)
+	if e.nonInteractive && r.Waiting() {
+		return api.Err("pending", "%s is %s; -n does not wait. Once it is approved, run the same command again", r.ID, r.State)
+	}
+	return client.New().Exec(r.ID, sudo)
 }
 
 func newExecute(o *options, detached bool) *cobra.Command {
 	var e executionFlags
-	name, short := "exec", "Wait for approval, then run a command once"
-	if detached {
-		name, short = "request", "Submit a request without waiting; prints its ID"
-	}
-	cmd := &cobra.Command{Use: name + " [OPTIONS] -- COMMAND [ARGUMENTS...]", Short: short,
-		Long: short + `.
-
-Options precede COMMAND; command arguments are passed verbatim. --context reads
-bounded snapshots as the caller; they are not re-read at execution. Approving a
-shell (-s/-i or a bare shell) authorizes everything run inside it. The target
-environment is sanitized.`,
-		Example: "  agsudo " + name + " --reason 'install build dependencies' -- dnf install -y openssl-devel\n  agsudo " + name + " -u postgres -- psql\n  agsudo " + name + " -s",
+	cmd := &cobra.Command{Use: "exec [OPTIONS] -- COMMAND [ARGUMENTS...]", Short: "Wait for approval, then run a command once", Long: requesterHelp,
+		Example: "  agsudo exec --reason 'install build dependencies' -- dnf install -y openssl-devel\n  agsudo exec -u postgres -- psql\n  agsudo exec -s",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if detached {
-				r, err := e.create(cmd.Context(), args, true)
-				if err != nil {
-					return err
-				}
-				return o.print(cmd, r, r.ID)
-			}
 			if o.json {
-				return usage("exec preserves command output; use request/status --json")
-			}
-			if cmd.Flags().Changed("request") {
-				if e.id == "" {
-					return usage("--request requires a nonempty request ID")
-				}
-				if len(args) != 0 || cmd.Flags().NFlag() > 1 {
-					return usage("--request runs a submitted request as it is; it takes no other options or command")
-				}
+				return usage("exec preserves command output; use request or show with --json")
 			}
 			return submit(cmd.Context(), e, args, false)
 		},
 	}
-	e.flags(cmd.Flags())
-	if !detached {
-		cmd.Long += `
-
-exec works like the sudo shim; see agsudo help --requester.`
-		cmd.Example += "\n  agsudo exec --request req_ID"
-		cmd.Flags().StringVar(&e.id, "request", "", "Wait for and run this submitted request")
+	if detached {
+		cmd.Use, cmd.Short = "request [OPTIONS] -- COMMAND [ARGUMENTS...]", "Submit a request without waiting; prints its ID"
+		cmd.Long = cmd.Short + ". Once it is approved, run the same command with sudo or agsudo exec;\nsee agsudo exec --help."
+		cmd.Example = "  ID=$(agsudo request --reason 'restart the app' -- systemctl restart app.service)"
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			r, err := e.create(cmd.Context(), args)
+			if err != nil {
+				return err
+			}
+			return o.print(cmd, r, r.ID)
+		}
 	}
+	e.flags(cmd.Flags())
 	return cmd
 }
 
@@ -176,15 +147,6 @@ not. Ordinary commands are not traced.`,
 			if err != nil {
 				return err
 			}
-			// Resolve the wrapped command through the new PATH too, so wrapping
-			// sudo itself is covered as well as sudo calls in its descendants.
-			if err = os.Setenv("PATH", dir+":"+os.Getenv("PATH")); err != nil {
-				return err
-			}
-			path, err := exec.LookPath(args[0])
-			if err != nil {
-				return err
-			}
 			helper, err := exec.LookPath(client.New().Helper)
 			if err == nil {
 				helper, err = filepath.Abs(helper)
@@ -192,10 +154,16 @@ not. Ordinary commands are not traced.`,
 			if err != nil {
 				return err
 			}
-			env := os.Environ()
-			env = setEnv(env, "AGSUDO_SESSION", session)
-			env = setEnv(env, "AGSUDO_HELPER", helper)
-			return syscall.Exec(path, args, env)
+			// Resolve the wrapped command through the new PATH too, so wrapping
+			// sudo itself is covered as well as sudo calls in its descendants.
+			os.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+			os.Setenv("AGSUDO_SESSION", session)
+			os.Setenv("AGSUDO_HELPER", helper)
+			path, err := exec.LookPath(args[0])
+			if err != nil {
+				return err
+			}
+			return syscall.Exec(path, args, os.Environ())
 		},
 	}
 	cmd.Flags().SetInterspersed(false)
@@ -203,12 +171,17 @@ not. Ordinary commands are not traced.`,
 	return cmd
 }
 
-func ensureShim() (string, error) {
+// selfPath is the resolved path of this binary, for shims and host hooks.
+func selfPath() (string, error) {
 	exe, err := os.Executable()
-	if err != nil {
-		return "", err
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
 	}
-	exe, err = filepath.EvalSymlinks(exe)
+	return exe, err
+}
+
+func ensureShim() (string, error) {
+	exe, err := selfPath()
 	if err != nil {
 		return "", err
 	}
@@ -233,16 +206,6 @@ func ensureShim() (string, error) {
 		}
 	}
 	return dir, nil
-}
-
-func setEnv(env []string, key, value string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, v := range env {
-		if !strings.HasPrefix(v, key+"=") {
-			out = append(out, v)
-		}
-	}
-	return append(out, key+"="+value)
 }
 
 // sudo compatibility uses pflag, with option parsing stopping at COMMAND.

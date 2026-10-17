@@ -21,7 +21,7 @@ import (
 // runRequest replaces the CLI process, so the caller's terminal, signals and
 // exit status reach this monitor directly. Like sudo, it exits 1 when the
 // command does not start, otherwise with the command's status or 128 + signal.
-func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, signals chan os.Signal, ui executionUI) int {
+func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, termName string, signals chan os.Signal, ui executionUI) int {
 	// Linux parent-death signals refer to the creating thread. Keep that thread
 	// alive for the entire monitored execution, even while waiting in Go code.
 	runtime.LockOSThread()
@@ -88,7 +88,9 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 		cmd.Args[0] = "-" + filepath.Base(r.Spec.Executable)
 	}
 	cmd.Dir = r.Spec.Cwd
-	cmd.Env = append(append([]string(nil), r.Spec.Environment...), "AGSUDO_REQUEST_ID="+r.ID)
+	if cmd.Env, err = environment(r, c.SecurePath, termName); err != nil {
+		return finish(1, "environment: "+err.Error())
+	}
 	cmd.ExtraFiles = []*os.File{f}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// With a terminal, the command stays in the caller's job, so job control

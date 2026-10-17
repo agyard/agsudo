@@ -35,9 +35,6 @@ func integrationEnvironment(dir, host, session string) string {
 const sessionNotice = "sudo in this session waits for a person or reviewing agent to approve each command (AG-sudo). If a sudo call times out, its request stays pending: ask for approval of the request ID it printed, then run the same command again. Details: sudo --help"
 
 func runIntegrationHook(host string, input io.Reader, output io.Writer) error {
-	if host != "codex" && host != "claude" {
-		return api.Err("usage", "supported integrations: codex, claude")
-	}
 	b, err := io.ReadAll(io.LimitReader(input, api.MaxMessage+1))
 	if err != nil {
 		return err
@@ -91,15 +88,10 @@ func runIntegrationHook(host string, input io.Reader, output io.Writer) error {
 	}
 	// Preserve every other tool argument. The original shell parses the command
 	// after the environment line; scripts, pipelines and heredocs keep working.
-	updated := make(map[string]json.RawMessage, len(event.Input))
-	for key, value := range event.Input {
-		updated[key] = value
-	}
-	updated["command"], err = json.Marshal(integrationEnvironment(dir, host, event.Session) + command)
-	if err != nil {
+	if event.Input["command"], err = json.Marshal(integrationEnvironment(dir, host, event.Session) + command); err != nil {
 		return err
 	}
-	return codexHookResult(output, "allow", "", updated)
+	return codexHookResult(output, "allow", "", event.Input)
 }
 
 func codexHookResult(output io.Writer, decision, reason string, updated any) error {

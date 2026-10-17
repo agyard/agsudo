@@ -41,9 +41,9 @@ func command(r api.Request) string {
 func commandLabel(r api.Request) string {
 	switch {
 	case r.Spec.Login:
-		return "login shell: " + command(r)
+		return "login shell, authorizes everything in it: " + command(r)
 	case r.Spec.Scope == "shell_session":
-		return "shell: " + command(r)
+		return "shell, authorizes everything in it: " + command(r)
 	}
 	return command(r)
 }
@@ -56,6 +56,9 @@ func prose(s string) string { return strings.Join(strings.Fields(api.Safe(s, fal
 // --no-preserve-root, and marks continuations with ↪, so wrapped untrusted
 // text never starts a line the way a field does. Text must be sanitized.
 func wrap(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
 	var lines []string
 	for _, line := range strings.Split(text, "\n") {
 		body := strings.TrimLeft(line, " │")
@@ -72,12 +75,14 @@ func wrap(text string, width int) string {
 			default:
 				current, used = current+" "+word, used+1+w
 			}
-			for used > width {
-				head := ansi.Truncate(current, width-ansi.StringWidth(prefix), "")
-				if head == "" {
-					break
+			// Hard-wrap an overlong word in one pass.
+			if head := ansi.Truncate(current, width-ansi.StringWidth(prefix), ""); used > width && head != "" {
+				parts := strings.Split(ansi.Hardwrap(current[len(head):], max(width-ansi.StringWidth(next), 1), true), "\n")
+				lines = append(lines, prefix+head)
+				for _, part := range parts[:len(parts)-1] {
+					lines = append(lines, next+part)
 				}
-				lines, prefix, current = append(lines, prefix+head), next, current[len(head):]
+				prefix, current = next, parts[len(parts)-1]
 				used = ansi.StringWidth(next + current)
 			}
 		}
@@ -101,14 +106,6 @@ func terminalWidth(out io.Writer) int {
 	return 0
 }
 
-// approvalTarget is what an approval covers, warning that a shell covers all.
-func approvalTarget(r api.Request) string {
-	if r.Spec.Scope == "shell_session" {
-		return "SHELL (authorizes everything run in it) " + command(r)
-	}
-	return command(r)
-}
-
 // elide fits s into width cells by cutting its middle, so both the start and
 // the end of a command stay visible where a decision is confirmed.
 func elide(s string, width int) string {
@@ -127,7 +124,7 @@ func requestText(r api.Request) string {
 		}
 	}
 	fmt.Fprintf(&b, "%s  %s\n", r.ID, r.State)
-	field("Requester", fmt.Sprintf("UID %d, GID %d", r.OwnerUID, r.OwnerGID))
+	field("Requester", fmt.Sprintf("UID %d", r.OwnerUID))
 	field("Command", command(r))
 	if r.Spec.Scope == "shell_session" {
 		field("Scope", "shell; everything it runs, typed or piped in, is authorized without review")
@@ -146,9 +143,8 @@ func requestText(r api.Request) string {
 	field("Reason (caller supplied)", prose(r.Spec.Reason))
 	for _, d := range []*api.Decision{r.Suggestion, r.Decision} {
 		if d != nil {
-			fmt.Fprintf(&b, "\n%s\n", strings.TrimSpace(fmt.Sprintf("%s by UID %d at %s %s", d.Action, d.Actor.UID, when(d.At), prose(d.Actor.Label))))
+			fmt.Fprintf(&b, "\n%s by UID %d at %s\n", d.Action, d.UID, when(d.At))
 			field("From session", d.Session)
-			field("Summary", prose(d.Summary))
 			field("Reason", prose(d.Reason))
 			if d.Action == "defer" {
 				field("Recommendation", d.Recommend)
@@ -163,13 +159,9 @@ func requestText(r api.Request) string {
 	} else {
 		field("Failure", prose(r.Failure))
 	}
-	b.WriteString("\nEnvironment (sanitized):\n")
-	for _, value := range r.Spec.Environment {
-		fmt.Fprintf(&b, "  %s\n", api.Safe(value, false))
-	}
 	for _, f := range r.Spec.Context {
 		content := "  │ " + strings.ReplaceAll(strings.TrimSuffix(api.Safe(f.Content, true), "\n"), "\n", "\n  │ ")
-		fmt.Fprintf(&b, "\nContext (caller-supplied snapshot from submission): %s\nSHA256: %s\n%s\n", api.Safe(f.Path, false), f.SHA256, content)
+		fmt.Fprintf(&b, "\nContext (caller-supplied snapshot from submission): %s\n%s\n", api.Safe(f.Path, false), content)
 	}
 	return strings.TrimSpace(b.String())
 }

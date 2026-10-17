@@ -3,7 +3,6 @@ package helper
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"os"
 	"os/user"
@@ -127,13 +126,10 @@ func resolve(name, cwd, path string) (string, error) {
 	return "", api.Err("command_not_found", "%q not found in the secure PATH %s", name, path)
 }
 
-func prepare(in api.Input, c Config, uid, gid int) (api.Spec, error) {
+func prepare(in api.Input, c Config, uid int) (api.Spec, error) {
 	s := api.Spec{Argv: in.Argv, Cwd: in.Cwd, Reason: in.Reason, Context: in.Context, Session: in.Session, Scope: "command", Login: in.Login}
 	if !filepath.IsAbs(s.Cwd) || strings.IndexByte(s.Cwd, 0) >= 0 {
 		return s, api.Err("invalid_input", "cwd must be an absolute path")
-	}
-	if in.Term != "" && !termPattern.MatchString(in.Term) {
-		return s, api.Err("invalid_input", "invalid TERM")
 	}
 	var err error
 	s.Target, err = lookupUser(in.User)
@@ -187,24 +183,30 @@ func prepare(in api.Input, c Config, uid, gid int) (api.Spec, error) {
 	}
 	// Snapshots are read by the caller; the helper never reads them as root.
 	total = 0
-	for i, f := range s.Context {
+	for _, f := range s.Context {
 		total += len(f.Content)
 		if !filepath.IsAbs(f.Path) || len(f.Content) > api.MaxContextFile || !utf8.ValidString(f.Content) {
 			return s, api.Err("invalid_input", "context %s must be UTF-8 text of at most 64 KiB", f.Path)
 		}
-		s.Context[i].SHA256, s.Context[i].Source = api.Hash([]byte(f.Content)), "caller_supplied"
 	}
 	if len(s.Context) > 8 || total > 256<<10 {
 		return s, api.Err("invalid_input", "attach at most 8 context files, 256 KiB in total")
 	}
-	caller, err := user.LookupId(strconv.Itoa(uid))
-	if err != nil {
-		return s, err
-	}
-	s.Environment = []string{"PATH=" + c.SecurePath, "HOME=" + s.Target.Home, "USER=" + s.Target.Name, "LOGNAME=" + s.Target.Name, "SHELL=" + s.Target.Shell, "LANG=C.UTF-8", fmt.Sprintf("SUDO_UID=%d", uid), fmt.Sprintf("SUDO_GID=%d", gid), "SUDO_USER=" + caller.Username}
-	s.Environment = append(s.Environment, "SUDO_COMMAND="+strings.Join(s.Argv, " "))
-	if in.Term != "" {
-		s.Environment = append(s.Environment, "TERM="+in.Term)
-	}
 	return s, nil
+}
+
+// environment is the sanitized environment a request runs with, built at
+// execution from the reviewed spec; the caller supplies only a checked TERM.
+func environment(r api.Request, securePath, term string) ([]string, error) {
+	owner, err := user.LookupId(strconv.Itoa(r.OwnerUID))
+	if err != nil {
+		return nil, err
+	}
+	t := r.Spec.Target
+	env := []string{"PATH=" + securePath, "HOME=" + t.Home, "USER=" + t.Name, "LOGNAME=" + t.Name, "SHELL=" + t.Shell, "LANG=C.UTF-8",
+		"SUDO_UID=" + owner.Uid, "SUDO_GID=" + owner.Gid, "SUDO_USER=" + owner.Username, "SUDO_COMMAND=" + strings.Join(r.Spec.Argv, " "), "AGSUDO_REQUEST_ID=" + r.ID}
+	if termPattern.MatchString(term) {
+		env = append(env, "TERM="+term)
+	}
+	return env, nil
 }

@@ -51,7 +51,7 @@ func waitForApproval(ctx context.Context, s *store.Store, a store.Access, id str
 		switch {
 		case err != nil:
 			problem = err.Error()
-		case a.UID != r.OwnerUID && a.UID != 0:
+		case !a.Owns(r):
 			problem = "only the requester can execute " + id
 		case r.State == "approved":
 			return r, 0

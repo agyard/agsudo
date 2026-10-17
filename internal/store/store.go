@@ -6,10 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -19,12 +16,17 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const schema = 2
+
 type Access struct {
 	UID      int
-	Reviewer bool
+	Reviewer bool // Includes root.
 }
 
-func (a Access) sees(r api.Request) bool { return a.UID == 0 || a.Reviewer || a.UID == r.OwnerUID }
+func (a Access) sees(r api.Request) bool { return a.Reviewer || a.UID == r.OwnerUID }
+
+// Owns reports whether a may execute r: only its requester, or root.
+func (a Access) Owns(r api.Request) bool { return a.UID == r.OwnerUID || a.UID == 0 }
 
 type Store struct {
 	db    *sql.DB
@@ -33,6 +35,9 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
+	if strings.ContainsRune(path, '?') {
+		return nil, api.Err("configuration", "state path cannot contain '?'")
+	}
 	// WAL conversion and schema creation cannot safely race another first
 	// connection. flock covers initialization only; SQLite owns normal locking.
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
@@ -44,38 +49,32 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	db, err := sql.Open("sqlite", path)
+	// IMMEDIATE transactions avoid the deferred-transaction upgrade race
+	// between separate helper processes.
+	db, err := sql.Open("sqlite", path+"?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=synchronous(FULL)&_pragma=temp_store(MEMORY)")
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;"); err != nil {
-		db.Close()
-		return nil, err
-	}
 	var version int
-	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if version > 1 {
-		db.Close()
-		return nil, api.Err("schema_version", "database schema %d is newer than supported schema 1", version)
-	}
-	if version == 0 {
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err == nil && version == 0 {
 		_, err = db.Exec(`PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS requests (
- id TEXT NOT NULL UNIQUE, owner_uid INTEGER NOT NULL, session TEXT NOT NULL,
- state TEXT NOT NULL, body BLOB NOT NULL
+CREATE TABLE requests (
+ id TEXT PRIMARY KEY, owner_uid INTEGER NOT NULL, session TEXT NOT NULL, state TEXT NOT NULL,
+ expires_at INTEGER NOT NULL, command_key TEXT NOT NULL, body BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS requests_owner_state ON requests(owner_uid,state);
-CREATE TABLE IF NOT EXISTS events (
+CREATE INDEX requests_state ON requests(state,expires_at);
+CREATE INDEX requests_command ON requests(owner_uid,session,command_key);
+CREATE TABLE events (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, owner_uid INTEGER NOT NULL,
  session TEXT NOT NULL, request_id TEXT NOT NULL, body BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS events_owner ON events(owner_uid,sequence);
-CREATE INDEX IF NOT EXISTS events_session ON events(session,sequence);
-PRAGMA user_version=1;`)
+CREATE INDEX events_owner ON events(owner_uid,sequence);
+CREATE INDEX events_session ON events(session,sequence);
+CREATE INDEX events_request ON events(request_id,sequence);
+PRAGMA user_version=2;`)
+	} else if err == nil && version != schema {
+		err = api.Err("schema_version", "%s has database schema %d, not %d; move it aside to start a new one", path, version, schema)
 	}
 	if err != nil {
 		db.Close()
@@ -85,10 +84,38 @@ PRAGMA user_version=1;`)
 }
 func (s *Store) Close() error { return s.db.Close() }
 
+type querier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// scan reads rows of (key, JSON body).
+func scan[T any](ctx context.Context, q querier, query string, args ...any) ([]T, []int64, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var items []T
+	var keys []int64
+	for rows.Next() {
+		var key int64
+		var b []byte
+		var item T
+		if err = rows.Scan(&key, &b); err != nil {
+			return nil, nil, err
+		}
+		if err = json.Unmarshal(b, &item); err != nil {
+			return nil, nil, err
+		}
+		items, keys = append(items, item), append(keys, key)
+	}
+	return items, keys, rows.Err()
+}
+
 // scope restricts a query to requests the caller may see, optionally in one session.
 func scope(a Access, session string) (string, []any) {
 	q, args := "", []any{}
-	if !a.Reviewer && a.UID != 0 {
+	if !a.Reviewer {
 		q, args = " AND owner_uid=?", append(args, a.UID)
 	}
 	if session != "" {
@@ -97,138 +124,41 @@ func scope(a Access, session string) (string, []any) {
 	return q, args
 }
 
-func scan(ctx context.Context, c *sql.Conn, q string, args ...any) ([]api.Request, int64, error) {
-	rows, err := c.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	var rs []api.Request
-	var last int64
-	for rows.Next() {
-		var b []byte
-		var r api.Request
-		if err = rows.Scan(&last, &b); err != nil {
-			return nil, 0, err
-		}
-		if err = json.Unmarshal(b, &r); err != nil {
-			return nil, 0, err
-		}
-		rs = append(rs, r)
-	}
-	return rs, last, rows.Err()
-}
-
 // commandKey identifies what would run: the spec without its explanations.
 func commandKey(spec api.Spec) string {
 	spec.Reason, spec.Context = "", nil
 	return api.Digest(spec)
 }
 
-// refresh performs lifecycle housekeeping on demand, without a timer service.
-func (s *Store) refresh(ctx context.Context, c *sql.Conn, filter string, args ...any) ([]api.Request, error) {
-	rs, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE state IN ('pending','needs_human','approved','running')"+filter, args...)
-	for i := 0; err == nil && i < len(rs); i++ {
-		if kind := s.normalize(&rs[i]); kind != "" {
-			err = s.save(ctx, c, &rs[i], kind, lifecycle)
-		}
-	}
-	return rs, err
-}
-
-// BEGIN IMMEDIATE avoids the deferred-transaction upgrade race between separate
-// helper processes. Business errors can commit housekeeping without authorizing.
-func (s *Store) transaction(ctx context.Context, fn func(*sql.Conn) error) error {
-	c, err := s.db.Conn(ctx)
+// Business errors returned by fn still commit housekeeping but authorize nothing.
+func (s *Store) transaction(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
-	if _, err = c.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	defer tx.Rollback() // No-op after Commit.
+	if err = fn(tx); err != nil {
 		return err
 	}
-	defer c.ExecContext(context.Background(), "ROLLBACK") // no-op after COMMIT
-	if err = fn(c); err != nil {
-		return err
-	}
-	_, err = c.ExecContext(ctx, "COMMIT")
-	return err
+	return tx.Commit()
 }
 
-func (s *Store) save(ctx context.Context, c *sql.Conn, r *api.Request, kind string, actor api.Actor) error {
-	r.Revision++
+func (s *Store) save(ctx context.Context, tx *sql.Tx, r *api.Request, kind string, actor int) error {
 	r.UpdatedAt = s.Now()
 	body, err := json.Marshal(r)
 	if err != nil {
 		return err
 	}
-	_, err = c.ExecContext(ctx, `INSERT INTO requests(id,owner_uid,session,state,body) VALUES(?,?,?,?,?)
- ON CONFLICT(id) DO UPDATE SET state=excluded.state,body=excluded.body`, r.ID, r.OwnerUID, r.Spec.Session, r.State, body)
+	_, err = tx.ExecContext(ctx, `INSERT INTO requests(id,owner_uid,session,state,expires_at,command_key,body) VALUES(?,?,?,?,?,?,?)
+ ON CONFLICT(id) DO UPDATE SET state=excluded.state,body=excluded.body`, r.ID, r.OwnerUID, r.Spec.Session, r.State, r.ExpiresAt.UnixNano(), commandKey(r.Spec), body)
 	if err != nil {
 		return err
 	}
-	event := api.Event{SchemaVersion: api.Version, At: r.UpdatedAt, Type: kind, RequestID: r.ID, OwnerUID: r.OwnerUID, Session: r.Spec.Session, Actor: actor, Request: *r}
-	body, err = json.Marshal(event)
-	if err != nil {
-		return err
+	if body, err = json.Marshal(api.Event{Type: kind, ActorUID: actor, Request: *r}); err == nil {
+		_, err = tx.ExecContext(ctx, "INSERT INTO events(owner_uid,session,request_id,body) VALUES(?,?,?,?)", r.OwnerUID, r.Spec.Session, r.ID, body)
 	}
-	_, err = c.ExecContext(ctx, "INSERT INTO events(owner_uid,session,request_id,body) VALUES(?,?,?,?)", r.OwnerUID, r.Spec.Session, r.ID, body)
 	return err
 }
-
-// Create submits a request. With reuseOnly it returns an existing request or
-// fails, so sudo -n never asks for a new approval.
-func (s *Store) Create(ctx context.Context, r api.Request, reuseOnly bool) (api.Request, error) {
-	r.SchemaVersion, r.State, r.CreatedAt = api.Version, "pending", s.Now()
-	r.Digest = api.Digest(r.Spec)
-	err := s.transaction(ctx, func(c *sql.Conn) error {
-		rs, err := s.refresh(ctx, c, " AND owner_uid=?", r.OwnerUID)
-		if err != nil {
-			return err
-		}
-		denied, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE owner_uid=? AND session=? AND state='denied' ORDER BY rowid DESC LIMIT 20", r.OwnerUID, r.Spec.Session)
-		if err != nil {
-			return err
-		}
-		// Running the same command again in the same session attaches to its
-		// unused request. A new reason or context replaces a pending request,
-		// but approvals and deferrals stay; the identical request gets a recent
-		// denial again instead of asking anew.
-		count, key := 0, commandKey(r.Spec)
-		var replaced *api.Request
-		for _, old := range append(rs, denied...) {
-			same := old.Spec.Session == r.Spec.Session && commandKey(old.Spec) == key
-			switch {
-			case same && old.Unstarted() && (old.State != "pending" || old.Digest == r.Digest),
-				same && old.State == "denied" && old.Digest == r.Digest && s.Now().Before(old.ExpiresAt):
-				r = old
-				return nil
-			case same && old.State == "pending" && !reuseOnly:
-				replaced = &old
-				continue
-			}
-			if old.Unstarted() {
-				count++
-			}
-		}
-		if reuseOnly {
-			return api.Err("pending", "approval required; run the command without -n to ask for it")
-		}
-		if count >= 256 {
-			return api.Err("queue_full", "at most 256 unconsumed requests per user; list and cancel stale requests")
-		}
-		if replaced != nil {
-			replaced.State, replaced.Failure = "canceled", "replaced by "+r.ID
-			if err := s.save(ctx, c, replaced, "request.canceled", api.Actor{UID: r.OwnerUID}); err != nil {
-				return err
-			}
-		}
-		return s.save(ctx, c, &r, "request.created", api.Actor{UID: r.OwnerUID})
-	})
-	return r, err
-}
-
-var lifecycle = api.Actor{UID: 0, Label: "lifecycle"}
 
 func (s *Store) normalize(r *api.Request) string {
 	if r.Unstarted() && !s.Now().Before(r.ExpiresAt) {
@@ -243,25 +173,97 @@ func (s *Store) normalize(r *api.Request) string {
 	return ""
 }
 
-func (s *Store) change(ctx context.Context, id string, a Access, actor api.Actor, fn func(*api.Request) (string, error)) (api.Request, error) {
+// refresh performs lifecycle housekeeping on demand, without a timer service.
+// Only expired and running requests can need it.
+func (s *Store) refresh(ctx context.Context, tx *sql.Tx, filter string, args ...any) error {
+	rs, _, err := scan[api.Request](ctx, tx, "SELECT rowid,body FROM requests WHERE (state='running' OR state IN ('pending','needs_human','approved') AND expires_at<=?)"+filter, append([]any{s.Now().UnixNano()}, args...)...)
+	for i := 0; err == nil && i < len(rs); i++ {
+		if kind := s.normalize(&rs[i]); kind != "" {
+			err = s.save(ctx, tx, &rs[i], kind, 0)
+		}
+	}
+	return err
+}
+
+// Create submits a request. With reuseOnly it returns an existing request or
+// fails, so sudo -n never asks for a new approval.
+func (s *Store) Create(ctx context.Context, r api.Request, reuseOnly bool) (api.Request, error) {
+	r.State, r.CreatedAt, r.Digest = "pending", s.Now(), api.Digest(r.Spec)
+	err := s.transaction(ctx, func(tx *sql.Tx) error {
+		if err := s.refresh(ctx, tx, " AND owner_uid=?", r.OwnerUID); err != nil {
+			return err
+		}
+		// Running the same command again in the same session attaches to its
+		// unused request. A new reason or context replaces a pending request,
+		// but approvals and deferrals stay; the identical request gets a recent
+		// denial again instead of asking anew.
+		matches, _, err := scan[api.Request](ctx, tx, "SELECT rowid,body FROM requests WHERE owner_uid=? AND session=? AND command_key=? AND (state IN ('pending','needs_human','approved') OR state='denied' AND expires_at>?) ORDER BY rowid DESC",
+			r.OwnerUID, r.Spec.Session, commandKey(r.Spec), s.Now().UnixNano())
+		if err != nil {
+			return err
+		}
+		var replaced *api.Request
+		for _, old := range matches {
+			switch {
+			case old.Unstarted() && (old.State != "pending" || old.Digest == r.Digest), old.State == "denied" && old.Digest == r.Digest:
+				r = old
+				return nil
+			case old.State == "pending" && !reuseOnly:
+				replaced = &old
+			}
+		}
+		if reuseOnly {
+			return api.Err("pending", "approval required; run the command without -n to ask for it")
+		}
+		var count int
+		if err = tx.QueryRowContext(ctx, "SELECT count(*) FROM requests WHERE owner_uid=? AND state IN ('pending','needs_human','approved')", r.OwnerUID).Scan(&count); err != nil {
+			return err
+		}
+		if replaced != nil {
+			count--
+			replaced.State, replaced.Failure = "canceled", "replaced by "+r.ID
+			if err = s.save(ctx, tx, replaced, "request.canceled", r.OwnerUID); err != nil {
+				return err
+			}
+		}
+		if count >= 256 {
+			return api.Err("queue_full", "at most 256 unconsumed requests per user; cancel stale requests")
+		}
+		return s.save(ctx, tx, &r, "request.created", r.OwnerUID)
+	})
+	return r, err
+}
+
+func (s *Store) load(ctx context.Context, q querier, id string, a Access) (api.Request, error) {
+	rs, _, err := scan[api.Request](ctx, q, "SELECT rowid,body FROM requests WHERE id=?", id)
+	if err == nil && (len(rs) == 0 || !a.sees(rs[0])) {
+		err = api.Err("not_found", "request %s not found", id)
+	}
+	if err != nil {
+		return api.Request{}, err
+	}
+	return rs[0], nil
+}
+
+// Get reads without the write lock unless housekeeping is due.
+func (s *Store) Get(ctx context.Context, id string, a Access) (api.Request, error) {
+	r, err := s.load(ctx, s.db, id, a)
+	if probe := r; err != nil || s.normalize(&probe) == "" {
+		return r, err
+	}
+	return s.change(ctx, id, a, a.UID, nil)
+}
+
+func (s *Store) change(ctx context.Context, id string, a Access, actor int, fn func(*api.Request) (string, error)) (api.Request, error) {
 	var r api.Request
 	var business error
-	err := s.transaction(ctx, func(c *sql.Conn) error {
-		var b []byte
-		if err := c.QueryRowContext(ctx, "SELECT body FROM requests WHERE id=?", id).Scan(&b); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return api.Err("not_found", "request %s not found", id)
-			}
+	err := s.transaction(ctx, func(tx *sql.Tx) error {
+		var err error
+		if r, err = s.load(ctx, tx, id, a); err != nil {
 			return err
-		}
-		if err := json.Unmarshal(b, &r); err != nil {
-			return err
-		}
-		if !a.sees(r) {
-			return api.Err("not_found", "request %s not found", id)
 		}
 		if kind := s.normalize(&r); kind != "" {
-			if err := s.save(ctx, c, &r, kind, lifecycle); err != nil {
+			if err = s.save(ctx, tx, &r, kind, 0); err != nil {
 				return err
 			}
 		}
@@ -274,7 +276,7 @@ func (s *Store) change(ctx context.Context, id string, a Access, actor api.Actor
 			return nil
 		}
 		if kind != "" {
-			return s.save(ctx, c, &r, kind, actor)
+			return s.save(ctx, tx, &r, kind, actor)
 		}
 		return nil
 	})
@@ -282,9 +284,6 @@ func (s *Store) change(ctx context.Context, id string, a Access, actor api.Actor
 		return r, err
 	}
 	return r, business
-}
-func (s *Store) Get(ctx context.Context, id string, a Access) (api.Request, error) {
-	return s.change(ctx, id, a, api.Actor{}, nil)
 }
 
 // Check binds a decision to what the reviewer inspected and who decides.
@@ -296,13 +295,13 @@ type Check struct {
 }
 
 func (s *Store) Decide(ctx context.Context, id string, a Access, d api.Decision, check Check) (api.Request, error) {
-	if !a.Reviewer && a.UID != 0 {
+	if !a.Reviewer {
 		return api.Request{}, api.Err("forbidden", "this user is not an approver")
 	}
-	d.Actor.UID, d.At, d.Session = a.UID, s.Now(), check.Session
-	return s.change(ctx, id, a, d.Actor, func(r *api.Request) (string, error) {
+	d.UID, d.At, d.Session = a.UID, s.Now(), check.Session
+	return s.change(ctx, id, a, a.UID, func(r *api.Request) (string, error) {
 		// A repeat of the same final decision is safe and adds no duplicate event.
-		repeat := r.Decision != nil && r.Decision.Action == d.Action && r.Decision.Actor.UID == a.UID && (r.State == "approved" || r.State == "denied")
+		repeat := r.Decision != nil && r.Decision.Action == d.Action && r.Decision.UID == a.UID && (r.State == "approved" || r.State == "denied")
 		switch {
 		case !r.Waiting() && !repeat:
 			return "", api.Err("conflict", "cannot %s %s: it is %s", d.Action, r.ID, r.State)
@@ -317,45 +316,39 @@ func (s *Store) Decide(ctx context.Context, id string, a Access, d api.Decision,
 		}
 		switch d.Action {
 		case "approve":
-			r.State = "approved"
-			r.Decision = &d
+			r.State, r.Decision = "approved", &d
 			return "request.approved", nil
 		case "deny":
-			r.State = "denied"
-			r.Decision = &d
+			r.State, r.Decision = "denied", &d
 			return "request.denied", nil
 		case "defer":
-			r.State = "needs_human"
-			r.Suggestion = &d
+			r.State, r.Suggestion = "needs_human", &d
 			return "request.deferred", nil
-		default:
-			return "", api.Err("invalid_input", "unknown decision %q", d.Action)
 		}
+		return "", api.Err("invalid_input", "unknown decision %q", d.Action)
 	})
 }
 func (s *Store) Cancel(ctx context.Context, id string, a Access, reason string) (api.Request, error) {
-	return s.change(ctx, id, a, api.Actor{UID: a.UID}, func(r *api.Request) (string, error) {
+	return s.change(ctx, id, a, a.UID, func(r *api.Request) (string, error) {
 		if r.State == "canceled" {
 			return "", nil
 		}
 		if !r.Unstarted() {
-			return "", api.Err("conflict", "cannot cancel request in state %s; cancel only applies before execution", r.State)
+			return "", api.Err("conflict", "cannot cancel %s: it is %s", r.ID, r.State)
 		}
-		r.State = "canceled"
-		r.Failure = reason
+		r.State, r.Failure = "canceled", reason
 		return "request.canceled", nil
 	})
 }
 func (s *Store) ClaimExecution(ctx context.Context, id string, a Access, p api.Process) (api.Request, error) {
-	return s.change(ctx, id, a, api.Actor{UID: a.UID}, func(r *api.Request) (string, error) {
-		if a.UID != r.OwnerUID && a.UID != 0 {
-			return "", api.Err("forbidden", "only the requester can execute this request")
+	return s.change(ctx, id, a, a.UID, func(r *api.Request) (string, error) {
+		if !a.Owns(*r) {
+			return "", api.Err("forbidden", "only the requester can execute %s", r.ID)
 		}
 		if r.State != "approved" {
-			return "", api.Err(r.State, "request is %s", r.State)
+			return "", api.Err(r.State, "%s is %s", r.ID, r.State)
 		}
-		r.State = "running"
-		r.Executor = p
+		r.State, r.Executor = "running", p
 		return "execution.claimed", nil
 	})
 }
@@ -364,8 +357,7 @@ func (s *Store) Started(ctx context.Context, id string, a Access, p api.Process,
 }
 func (s *Store) Finish(ctx context.Context, id string, a Access, p api.Process, code int, failure string) (api.Request, error) {
 	return s.executionUpdate(ctx, id, a, p, func(r *api.Request) string {
-		r.ExitCode = &code
-		r.Failure = failure
+		r.ExitCode, r.Failure = &code, failure
 		if failure != "" {
 			r.State = "failed"
 			return "execution.failed"
@@ -375,7 +367,7 @@ func (s *Store) Finish(ctx context.Context, id string, a Access, p api.Process, 
 	})
 }
 func (s *Store) executionUpdate(ctx context.Context, id string, a Access, p api.Process, fn func(*api.Request) string) (api.Request, error) {
-	return s.change(ctx, id, a, api.Actor{UID: a.UID}, func(r *api.Request) (string, error) {
+	return s.change(ctx, id, a, a.UID, func(r *api.Request) (string, error) {
 		if r.State != "running" || r.Executor != p {
 			return "", api.Err("conflict", "execution ownership lost")
 		}
@@ -383,81 +375,50 @@ func (s *Store) executionUpdate(ctx context.Context, id string, a Access, p api.
 	})
 }
 
-func bounded(n int) int {
-	if n <= 0 {
-		return 50
-	}
-	return min(n, api.PageLimit)
-}
-func (s *Store) List(ctx context.Context, a Access, states []string, session string, cursor int64, limit int) (api.List, error) {
+// List returns the requests the caller may see, oldest first; no states means all.
+func (s *Store) List(ctx context.Context, a Access, states []string, session string) ([]api.Request, error) {
 	filter, args := scope(a, session)
-	page := api.List{Requests: []api.Request{}, NextCursor: cursor}
-	err := s.transaction(ctx, func(c *sql.Conn) error {
-		if _, err := s.refresh(ctx, c, filter, args...); err != nil {
+	var rs []api.Request
+	err := s.transaction(ctx, func(tx *sql.Tx) error {
+		if err := s.refresh(ctx, tx, filter, args...); err != nil {
 			return err
 		}
-		q := "SELECT rowid,body FROM requests WHERE rowid>?" + filter
-		args := append([]any{cursor}, args...)
+		q := "SELECT rowid,body FROM requests WHERE 1" + filter
 		if len(states) > 0 {
-			q += " AND state IN (" + strings.TrimSuffix(strings.Repeat("?,", len(states)), ",") + ")"
+			q += " AND state IN (?" + strings.Repeat(",?", len(states)-1) + ")"
 			for _, state := range states {
 				args = append(args, state)
 			}
 		}
-		rs, last, err := scan(ctx, c, q+" ORDER BY rowid LIMIT ?", append(args, bounded(limit))...)
-		if len(rs) > 0 {
-			page.Requests, page.NextCursor = rs, last
-		}
+		var err error
+		rs, _, err = scan[api.Request](ctx, tx, q+" ORDER BY rowid", args...)
 		return err
 	})
-	return page, err
+	if rs == nil {
+		rs = []api.Request{}
+	}
+	return rs, err
 }
 
-// Events refreshes first, so expiry and lost executions appear without a
-// daemon. Cursor -1 starts after the latest event.
-func (s *Store) Events(ctx context.Context, a Access, session, id string, cursor int64, limit int) (api.Page, error) {
+// Events refreshes first, so expiry and lost executions appear without a daemon.
+func (s *Store) Events(ctx context.Context, a Access, session, id string, cursor int64) (api.Page, error) {
 	filter, args := scope(a, session)
 	p := api.Page{Events: []api.Event{}, NextCursor: cursor}
-	err := s.transaction(ctx, func(c *sql.Conn) error {
-		if _, err := s.refresh(ctx, c, filter, args...); err != nil {
+	err := s.transaction(ctx, func(tx *sql.Tx) error {
+		if err := s.refresh(ctx, tx, filter, args...); err != nil {
 			return err
-		}
-		if cursor < 0 {
-			return c.QueryRowContext(ctx, "SELECT coalesce(max(sequence),0) FROM events").Scan(&p.NextCursor)
 		}
 		q := "SELECT sequence,body FROM events WHERE sequence>?" + filter
 		args := append([]any{cursor}, args...)
 		if id != "" {
 			q, args = q+" AND request_id=?", append(args, id)
 		}
-		rows, err := c.QueryContext(ctx, q+" ORDER BY sequence LIMIT ?", append(args, bounded(limit))...)
-		if err != nil {
-			return err
+		es, keys, err := scan[api.Event](ctx, tx, q+" ORDER BY sequence LIMIT ?", append(args, api.PageSize)...)
+		for i := range es {
+			es[i].Sequence, p.NextCursor = keys[i], keys[i]
+			p.Events = append(p.Events, es[i])
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var e api.Event
-			var b []byte
-			if err = rows.Scan(&p.NextCursor, &b); err != nil {
-				return err
-			}
-			if err = json.Unmarshal(b, &e); err != nil {
-				return err
-			}
-			e.Sequence = p.NextCursor
-			p.Events = append(p.Events, e)
-		}
-		return rows.Err()
+		return err
 	})
 	return p, err
-}
-
-func ValidStates(states []string) error {
-	allowed := strings.Fields("pending needs_human approved running exited denied canceled expired failed unknown")
-	for _, s := range states {
-		if !slices.Contains(allowed, s) {
-			return api.Err("invalid_input", "unknown state %q (choose %s)", s, fmt.Sprint(allowed))
-		}
-	}
-	return nil
 }

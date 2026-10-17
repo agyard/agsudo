@@ -27,7 +27,7 @@ func testStore(t *testing.T) (*Store, string) {
 }
 func create(t *testing.T, s *Store) api.Request {
 	t.Helper()
-	r, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: s.Now().Add(time.Hour), Spec: api.Spec{Argv: []string{"id", api.ID("")}, Session: "test-session"}}, false)
+	r, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: api.Spec{Argv: []string{"id", api.ID("")}, Session: "test-session"}}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestOneShotExecutionAndAudit(t *testing.T) {
 	if got.ExitCode == nil || *got.ExitCode != 42 || got.State != "exited" {
 		t.Fatalf("bad result: %+v", got)
 	}
-	page, err := s.Events(testContext, owner, "", "", 0, 200)
+	page, err := s.Events(testContext, owner, "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestOneShotExecutionAndAudit(t *testing.T) {
 		t.Fatalf("events: %+v", page.Events)
 	}
 	for i, e := range page.Events {
-		if e.Type != want[i] || e.Request.Revision != i+1 || e.Sequence != int64(i+1) {
+		if e.Type != want[i] || e.Sequence != int64(i+1) || e.ActorUID != 1000 {
 			t.Fatalf("event %d: %+v", i, e)
 		}
 	}
@@ -104,7 +104,7 @@ func TestConcurrentFirstOpen(t *testing.T) {
 				return
 			}
 			defer s.Close()
-			_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: time.Now().Add(time.Minute), Spec: api.Spec{Argv: []string{api.ID("")}}}, false)
+			_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: time.Now().Add(time.Minute), Spec: api.Spec{Argv: []string{api.ID("")}}}, false)
 			results <- err
 		}()
 	}
@@ -119,7 +119,7 @@ func TestConcurrentFirstOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	p, err := s.Events(testContext, owner, "", "", 0, 200)
+	p, err := s.Events(testContext, owner, "", "", 0)
 	if err != nil || len(p.Events) != cap(results) {
 		t.Fatalf("lost requests during initialization: %d events, %v", len(p.Events), err)
 	}
@@ -198,7 +198,7 @@ func TestAccessAndReviewerCannotExecuteSomeoneElsesRequest(t *testing.T) {
 	}
 	_, err = s.ClaimExecution(testContext, r.ID, Access{UID: 1001, Reviewer: true}, api.Process{PID: 1})
 	code(t, err, "forbidden")
-	p, err := s.Events(testContext, Access{UID: 1001}, "", "", 0, 200)
+	p, err := s.Events(testContext, Access{UID: 1001}, "", "", 0)
 	if err != nil || len(p.Events) != 0 {
 		t.Fatalf("cross-user event leak: %+v %v", p, err)
 	}
@@ -211,8 +211,8 @@ func TestDeferKeepsSuggestionAndCrashNeverRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.List(testContext, owner, []string{"pending"}, "", 0, 200)
-	if err != nil || len(p.Requests) != 0 {
+	p, err := s.List(testContext, owner, []string{"pending"}, "")
+	if err != nil || len(p) != 0 {
 		t.Fatalf("deferred request recirculated: %+v %v", p, err)
 	}
 	r = approve(t, s, r)
@@ -254,7 +254,7 @@ func TestOnDemandExpiryAndQueueQuota(t *testing.T) {
 	r := create(t, s)
 	now := r.ExpiresAt
 	s.Now = func() time.Time { return now }
-	page, err := s.Events(testContext, owner, "", r.ID, 0, 200)
+	page, err := s.Events(testContext, owner, "", r.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

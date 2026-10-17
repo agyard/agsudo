@@ -14,7 +14,7 @@ import (
 
 func TestHelpAndUsageDoNotOpenHelper(t *testing.T) {
 	t.Setenv("AGSUDO_HELPER", "/does/not/exist")
-	for _, args := range [][]string{{"--help"}, {"help", "--help"}, {"review", "--help"}, {"status", "--help"}, {"watch", "--help"}, {"help", "audit", "export"}, {"help", "--requester"}, {"help", "--reviewer"}, {"version", "--json"}} {
+	for _, args := range [][]string{{"--help"}, {"help", "--help"}, {"review", "--help"}, {"exec", "--help"}, {"events", "--help"}, {"help", "review"}, {"--version"}} {
 		var out, errOut bytes.Buffer
 		if code := Execute(context.Background(), args, strings.NewReader(""), &out, &errOut); code != 0 {
 			t.Fatalf("%v: %d %s", args, code, errOut.String())
@@ -24,11 +24,9 @@ func TestHelpAndUsageDoNotOpenHelper(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{
-		{"nonsense"}, {"approve"}, {"exec"}, {"exec", "--bad-flag"},
-		{"help", "nonsense"}, {"help", "--requester", "review"}, {"help", "--requester", "--reviewer"},
-		{"review", "--tui", "--json"}, {"review", "--watch"}, {"review", "--all", "--state", "pending"},
-		{"exec", "--request", "req_x", "--", "id"}, {"exec", "--request", "", "--", "id"}, {"exec", "-s", "-i"},
-		{"exec", "--request", "req_x", "--user", ""}, {"exec", "--request", "req_x", "--shell=false"},
+		{"nonsense"}, {"approve"}, {"exec"}, {"exec", "--bad-flag"}, {"exec", "-s", "-i"}, {"exec", "--request", "req_x"},
+		{"review", "--tui", "--json"}, {"review", "--state", "pending"}, {"events", "--after", "-1"},
+		{"integration", "install", "nonsense"},
 	} {
 		var out, errOut bytes.Buffer
 		if code := Execute(context.Background(), args, strings.NewReader(""), &out, &errOut); code != 2 {
@@ -51,9 +49,6 @@ func TestSanitizeUntrustedTerminalContent(t *testing.T) {
 
 type fakeReview struct{ last api.Input }
 
-func (f *fakeReview) ListAll(context.Context, []string, string) ([]api.Request, error) {
-	return nil, nil
-}
 func (f *fakeReview) Call(_ context.Context, in api.Input, out any) error {
 	f.last = in
 	if p, ok := out.(*api.Request); ok {
@@ -87,7 +82,7 @@ func TestElideKeepsTheEndOfACommand(t *testing.T) {
 }
 func TestJSONErrorsWhereverTheFlagIs(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if code := Execute(context.Background(), []string{"approve", "req_x", "--bogus", "--json"}, strings.NewReader(""), &out, &errOut); code != 2 || !strings.HasPrefix(errOut.String(), `{"schema_version":1,"error":{"code":"usage"`) {
+	if code := Execute(context.Background(), []string{"approve", "req_x", "--bogus", "--json"}, strings.NewReader(""), &out, &errOut); code != 2 || !strings.HasPrefix(errOut.String(), `{"error":{"code":"usage"`) {
 		t.Fatalf("%d %s", code, errOut.String())
 	}
 }

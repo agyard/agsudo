@@ -47,7 +47,6 @@ func (i reviewItem) FilterValue() string {
 
 type reviewBackend interface {
 	Call(context.Context, api.Input, any) error
-	ListAll(context.Context, []string, string) ([]api.Request, error)
 }
 type refreshed struct {
 	requests   []api.Request
@@ -122,7 +121,11 @@ func (m *reviewModel) fetch() tea.Cmd {
 	if m.all {
 		states = nil
 	}
-	return func() tea.Msg { rs, err := b.ListAll(ctx, states, session); return refreshed{rs, err, gen} }
+	return func() tea.Msg {
+		var rs []api.Request
+		err := b.Call(ctx, api.Input{Operation: "list", States: states, Session: session}, &rs)
+		return refreshed{rs, err, gen}
+	}
 }
 func (m *reviewModel) selected() *api.Request {
 	if i, ok := m.queue.SelectedItem().(reviewItem); ok {
@@ -235,7 +238,7 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.reason.Blur()
 				return m, func() tea.Msg {
 					var out api.Request
-					err := b.Call(ctx, api.Input{Operation: "decide", ID: r.ID, Action: action, Actor: "human:tui", Reason: reason, ExpectDigest: r.Digest, Session: os.Getenv("AGSUDO_SESSION")}, &out)
+					err := b.Call(ctx, api.Input{Operation: "decide", ID: r.ID, Action: action, Reason: reason, ExpectDigest: r.Digest, Session: os.Getenv("AGSUDO_SESSION")}, &out)
 					return decided{out, err}
 				}
 			}
@@ -329,7 +332,7 @@ func (m *reviewModel) View() tea.View {
 	if m.confirm != nil {
 		title := "DENY " + command(*m.confirm)
 		if m.action == "approve" {
-			title = "APPROVE " + approvalTarget(*m.confirm)
+			title = "APPROVE " + commandLabel(*m.confirm)
 		}
 		foot = accent.Render(elide(title, m.width-4)) + "\n" + m.reason.View()
 	}

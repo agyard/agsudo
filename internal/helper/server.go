@@ -1,7 +1,6 @@
 package helper
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,61 +13,31 @@ import (
 	"time"
 
 	"github.com/agyard/agsudo/internal/api"
-	"github.com/agyard/agsudo/internal/proc"
 	"github.com/agyard/agsudo/internal/store"
 	"golang.org/x/sys/unix"
 )
 
 func respond(data any, err error) int {
-	r := api.Response{SchemaVersion: api.Version}
+	r := api.Response{Data: data}
 	if err != nil {
 		var e *api.Error
 		if !errors.As(err, &e) {
 			e = &api.Error{Code: "internal", Message: err.Error()}
 		}
-		r.Error = e
-	} else {
-		r.Data, err = json.Marshal(data)
-		if err != nil {
-			r.Error = &api.Error{Code: "internal", Message: err.Error()}
-		}
+		r = api.Response{Error: e}
 	}
-	if err = json.NewEncoder(os.Stdout).Encode(r); err != nil {
-		return 1
-	}
-	if r.Error != nil {
+	if json.NewEncoder(os.Stdout).Encode(r) != nil || r.Error != nil {
 		return 1
 	}
 	return 0
 }
 func decode(r io.Reader) (api.Input, error) {
-	b, err := io.ReadAll(io.LimitReader(r, api.MaxMessage+1))
-	if err != nil {
-		return api.Input{}, err
-	}
-	if len(b) > api.MaxMessage {
-		return api.Input{}, api.Err("invalid_input", "protocol message exceeds 1 MiB")
-	}
 	var in api.Input
-	// Reject both misspelled fields and additional trailing protocol messages.
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if err = d.Decode(&in); err != nil {
-		return in, api.Err("invalid_input", "invalid protocol JSON: %v", err)
+	if err := decodeOne(r, api.MaxMessage, &in); err != nil {
+		return in, api.Err("invalid_input", "invalid protocol message: %v", err)
 	}
-	if d.Decode(new(any)) != io.EOF {
-		return in, api.Err("invalid_input", "trailing protocol data")
-	}
-	if len(in.Actor) > 128 || len(in.Reason) > 8192 || len(in.Summary) > 8192 || len(in.Metadata) > 32 || in.Cursor < -1 || in.Limit < 0 {
-		return in, api.Err("invalid_input", "invalid request fields")
-	}
-	for k, v := range in.Metadata {
-		if len(k) > 128 || len(v) > 4096 {
-			return in, api.Err("invalid_input", "metadata too large")
-		}
-	}
-	if !api.ValidSession(in.Session) {
-		return in, api.Err("invalid_input", "invalid session")
+	if len(in.Reason) > 8192 || in.Cursor < 0 || !api.ValidSession(in.Session) {
+		return in, api.Err("invalid_input", "invalid reason, cursor or session")
 	}
 	if in.Recommend != "" && in.Recommend != "approve" && in.Recommend != "deny" && in.Recommend != "unknown" {
 		return in, api.Err("invalid_input", "recommend must be approve, deny or unknown")
@@ -111,7 +80,7 @@ func Main(args []string) int {
 	if run {
 		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	}
-	ui := executionUI{"agsudo", "agsudo help --requester"}
+	ui := executionUI{"agsudo", "agsudo exec --help"}
 	if args[0] == "run-sudo" {
 		ui = executionUI{"sudo", "sudo --help"}
 	}
@@ -127,7 +96,7 @@ func Main(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	uid, gid := os.Getuid(), os.Getgid()
+	uid, term := os.Getuid(), os.Getenv("TERM")
 	os.Clearenv()
 	if !c.Dev {
 		if err = unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
@@ -153,20 +122,20 @@ func Main(args []string) int {
 	}
 	defer s.Close()
 	if run {
-		return runRequest(s, c, a, in.ID, umask, signals, ui)
+		return runRequest(s, c, a, in.ID, umask, term, signals, ui)
 	}
-	data, err := dispatch(context.Background(), s, c, a, gid, in)
+	data, err := dispatch(context.Background(), s, c, a, in)
 	return respond(data, err)
 }
 
-func dispatch(ctx context.Context, s *store.Store, c Config, a store.Access, gid int, in api.Input) (any, error) {
+func dispatch(ctx context.Context, s *store.Store, c Config, a store.Access, in api.Input) (any, error) {
 	switch in.Operation {
 	case "info":
 		mode := "installed"
 		if c.Dev {
 			mode = "development (no elevation)"
 		}
-		return map[string]any{"mode": mode, "caller_uid": a.UID, "can_submit": c.canSubmit(a.UID), "can_review": a.Reviewer, "default_ttl_seconds": c.DefaultTTLSeconds, "max_ttl_seconds": c.MaxTTLSeconds}, nil
+		return map[string]any{"mode": mode, "caller_uid": a.UID, "can_submit": c.canSubmit(a.UID), "can_review": a.Reviewer}, nil
 	case "create":
 		if !c.canSubmit(a.UID) {
 			return nil, api.Err("forbidden", "this user cannot submit requests")
@@ -174,7 +143,7 @@ func dispatch(ctx context.Context, s *store.Store, c Config, a store.Access, gid
 		if c.Dev && in.User == "" {
 			in.User = fmt.Sprintf("#%d", a.UID)
 		}
-		spec, err := prepare(in, c, a.UID, gid)
+		spec, err := prepare(in, c, a.UID)
 		if err != nil {
 			return nil, err
 		}
@@ -185,22 +154,19 @@ func dispatch(ctx context.Context, s *store.Store, c Config, a store.Access, gid
 		if ttl < 1 || ttl > c.MaxTTLSeconds {
 			return nil, api.Err("invalid_input", "ttl must be between 1 and %d seconds", c.MaxTTLSeconds)
 		}
-		r := api.Request{ID: api.ID("req_"), OwnerUID: a.UID, OwnerGID: gid, Spec: spec, Detached: in.Detached, Submitter: proc.Identity(os.Getppid()), ExpiresAt: time.Now().UTC().Add(time.Duration(ttl) * time.Second)}
+		r := api.Request{ID: api.ID("req_"), OwnerUID: a.UID, Spec: spec, ExpiresAt: time.Now().UTC().Add(time.Duration(ttl) * time.Second)}
 		return s.Create(ctx, r, in.ReuseOnly)
 	case "get":
 		return s.Get(ctx, in.ID, a)
 	case "list":
-		if err := store.ValidStates(in.States); err != nil {
-			return nil, err
-		}
-		return s.List(ctx, a, in.States, in.Session, in.Cursor, in.Limit)
+		return s.List(ctx, a, in.States, in.Session)
 	case "decide":
-		d := api.Decision{Action: in.Action, Actor: api.Actor{UID: a.UID, Label: in.Actor}, Reason: in.Reason, Summary: in.Summary, Recommend: in.Recommend, Metadata: in.Metadata}
+		d := api.Decision{Action: in.Action, Reason: in.Reason, Recommend: in.Recommend}
 		return s.Decide(ctx, in.ID, a, d, store.Check{Digest: in.ExpectDigest, Session: in.Session, PendingOnly: in.PendingOnly})
 	case "cancel":
 		return s.Cancel(ctx, in.ID, a, in.Reason)
 	case "events":
-		return s.Events(ctx, a, in.Session, in.ID, in.Cursor, in.Limit)
+		return s.Events(ctx, a, in.Session, in.ID, in.Cursor)
 	default:
 		return nil, api.Err("invalid_input", "unknown helper operation %q", in.Operation)
 	}

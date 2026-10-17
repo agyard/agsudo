@@ -47,22 +47,23 @@ func TestExecutableRejectsSpecialAndSymlinkFiles(t *testing.T) {
 func TestContextAndEnvironment(t *testing.T) {
 	c := defaults()
 	uid := os.Getuid()
-	name := "#" + strconv.Itoa(uid)
-	in := api.Input{Argv: []string{"id"}, User: name, Cwd: t.TempDir(), Term: "xterm-256color", Context: []api.File{{Path: "/example", Content: "data"}}}
-	s, err := prepare(in, c, uid, os.Getgid())
+	in := api.Input{Argv: []string{"id"}, User: "#" + strconv.Itoa(uid), Cwd: t.TempDir(), Context: []api.File{{Path: "/example", Content: "data"}}}
+	spec, err := prepare(in, c, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, v := range s.Environment {
-		if strings.HasPrefix(v, "LD_") || strings.HasPrefix(v, "AGSUDO_HELPER=") {
-			t.Fatal("unsafe inherited environment")
+	t.Setenv("LD_PRELOAD", "/tmp/evil.so")
+	env, err := environment(api.Request{OwnerUID: uid, Spec: spec}, c.SecurePath, "xterm-256color\nX=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range env {
+		if strings.HasPrefix(v, "LD_") || strings.HasPrefix(v, "TERM=") || strings.HasPrefix(v, "X=") {
+			t.Fatalf("unsafe environment entry %q", v)
 		}
 	}
-	if s.Context[0].Source != "caller_supplied" || s.Context[0].SHA256 != api.Hash([]byte("data")) {
-		t.Fatal("context attribution missing")
-	}
 	in.Context[0].Content = "\xff"
-	if _, err = prepare(in, c, uid, os.Getgid()); err == nil {
+	if _, err = prepare(in, c, uid); err == nil {
 		t.Fatal("invalid UTF-8 context accepted")
 	}
 }

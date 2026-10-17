@@ -43,7 +43,7 @@ jobs:
           args: release --clean --skip=publish
       - name: Verify and publish
         run: |
-          test "$(dist/agsudo_linux_amd64_v1/agsudo version)" = "agsudo $RELEASE_TAG"
+          test "$(dist/agsudo_linux_amd64_v1/agsudo --version)" = "agsudo $RELEASE_TAG"
           test -x dist/agsudo-helper_linux_amd64_v1/agsudo-helper
           flags=(--latest)
           if [[ "$RELEASE_TAG" == *-* ]]; then flags=(--prerelease --latest=false); fi

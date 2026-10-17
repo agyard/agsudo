@@ -17,6 +17,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = str(ROOT / "bin/agsudo")
+HELPER = str(ROOT / "bin/agsudo-helper-dev")
 
 
 class Terminal:
@@ -79,7 +80,7 @@ class Integration(unittest.TestCase):
             self.skipTest("development helper intentionally refuses root; use privileged.py")
         self.temp = tempfile.TemporaryDirectory(prefix="agsudo-test-")
         self.addCleanup(self.temp.cleanup)
-        self.env = dict(os.environ, AGSUDO_HELPER=str(ROOT / "bin/agsudo-helper-dev"),
+        self.env = dict(os.environ, AGSUDO_HELPER=HELPER,
                         AGSUDO_DEV_STATE=self.temp.name + "/state",
                         XDG_CACHE_HOME=self.temp.name + "/cache", TERM="xterm-256color")
         self.env.pop("AGSUDO_SESSION", None)
@@ -93,31 +94,34 @@ class Integration(unittest.TestCase):
         return p
 
     def data(self, *args):
-        return json.loads(self.call(*args, "--json").stdout)["data"]
+        return json.loads(self.call(*args, "--json").stdout)
 
     def request(self, *command, options=()):
-        return json.loads(self.call("request", "--json", *options, "--", *command).stdout)["data"]
+        return json.loads(self.call("request", "--json", *options, "--", *command).stdout)
 
     def approve(self, req):
-        return self.data("approve", req["id"], "--expect-digest", req["digest"], "--actor", "agent:test")
+        return self.data("approve", req["id"], "--expect-digest", req["digest"])
+
+    def run_again(self, req, **kwargs):
+        # Running the same command again reuses its (approved) request.
+        return self.call("exec", "--", *req["spec"]["argv"], **kwargs)
 
     def test_command_streams_exit_status_and_one_shot(self):
         req = self.request("sh", "-c", "printf out; printf err >&2; exit 7")
         self.approve(req)
-        p = self.call("exec", "--request", req["id"], check=False)
+        p = self.run_again(req, check=False)
         self.assertEqual((p.returncode, p.stdout, p.stderr), (7, "out", "err"))
-        self.assertEqual(self.data("status", req["id"])["exit_code"], 7)
-        self.assertNotEqual(self.call("exec", "--request", req["id"], check=False).returncode, 0)
-        events = [json.loads(x) for x in self.call("audit", "export").stdout.splitlines()]
-        self.assertEqual([e["type"] for e in events], ["request.created", "request.approved", "execution.claimed", "execution.started", "execution.exited"])
-        last = events[-2]["sequence"]
-        tail = self.call("audit", "export", "--after", str(last)).stdout.splitlines()
+        self.assertEqual(self.data("show", req["id"])["exit_code"], 7)
+        self.assertNotEqual(self.request(*req["spec"]["argv"])["id"], req["id"])
+        events = [json.loads(x) for x in self.call("--json", "events").stdout.splitlines()]
+        self.assertEqual([e["type"] for e in events][:5], ["request.created", "request.approved", "execution.claimed", "execution.started", "execution.exited"])
+        tail = self.call("--json", "events", "--after", str(events[-2]["sequence"])).stdout.splitlines()
         self.assertEqual(len(tail), 1)
 
     def test_sudo_compatibility_environment(self):
         req = self.request("sh", "-c", 'printf "%s|%s|%s" "$SUDO_USER" "$SUDO_COMMAND" "$SUDO_UID"')
         self.approve(req)
-        p = self.call("exec", "--request", req["id"])
+        p = self.run_again(req)
         command = " ".join(req["spec"]["argv"])
         self.assertEqual(p.stdout, f"{pwd.getpwuid(os.getuid()).pw_name}|{command}|{os.getuid()}")
 
@@ -125,14 +129,14 @@ class Integration(unittest.TestCase):
         for caller, child in (("000", "0022"), ("027", "0027")):
             req = self.request("sh", "-c", "umask")
             self.approve(req)
-            p = subprocess.run(["sh", "-c", f'umask {caller}; exec "$0" exec --request "$1"', CLI, req["id"]],
+            p = subprocess.run(["sh", "-c", f'umask {caller}; exec "$0" exec -- sh -c umask', CLI],
                                env=self.env, text=True, capture_output=True, timeout=15)
             self.assertEqual(p.stdout.strip(), child, p.stderr)
 
     def test_terminal_interrupt_reaches_command_once(self):
         req = self.request("python3", "-c", "import signal, time\nn = []\nsignal.signal(signal.SIGINT, lambda *_: n.append(1))\nprint('READY', flush=True)\ntime.sleep(1.5)\nprint('COUNT', len(n))")
         self.approve(req)
-        tty = Terminal(["exec", "--request", req["id"]], self.env)
+        tty = Terminal(["exec", "--", *req["spec"]["argv"]], self.env)
         self.addCleanup(tty.close)
         tty.until("READY")
         tty.send("\x03")
@@ -142,16 +146,16 @@ class Integration(unittest.TestCase):
 
     def test_cancel_expiry_and_defer(self):
         req = self.request("id")
-        self.data("defer", req["id"], "--recommend", "approve", "--summary", "needs a person", "--reason", "unsure")
-        self.assertEqual(self.data("review")["requests"], [])
-        self.assertEqual(len(self.data("review", "--state", "needs_human")["requests"]), 1)
+        self.data("defer", req["id"], "--recommend", "approve", "--reason", "needs a person")
+        self.assertEqual(self.data("review"), [])
+        self.assertEqual([r["state"] for r in self.data("review", "--all")], ["needs_human"])
         self.call("cancel", req["id"])
         self.assertNotEqual(self.call("approve", req["id"], check=False).returncode, 0)
         req = self.request("id", options=("--ttl", "1s"))
         self.approve(req)
         time.sleep(1.05)
-        self.assertEqual(self.data("status", req["id"])["state"], "expired")
-        p = self.call("exec", "--request", req["id"], check=False)
+        self.assertEqual(self.data("show", req["id"])["state"], "expired")
+        p = subprocess.run([HELPER, "run", req["id"]], env=self.env, text=True, capture_output=True, timeout=15)
         self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: {req['id']} is expired; command was not started\n"))
 
     def test_context_and_changed_executable(self):
@@ -164,10 +168,11 @@ class Integration(unittest.TestCase):
         self.assertEqual(req["spec"]["context"][0]["content"], context.read_text())
         self.approve(req)
         script.write_text("#!/bin/sh\nprintf changed\n")
-        p = self.call("exec", "--request", req["id"], check=False)
+        # The helper checks the executable again when it runs an approval.
+        p = subprocess.run([HELPER, "run", req["id"]], env=self.env, text=True, capture_output=True, timeout=15)
         self.assertEqual((p.returncode, p.stdout), (1, ""))
         self.assertIn("executable changed", p.stderr)
-        self.assertEqual(self.data("status", req["id"])["state"], "failed")
+        self.assertEqual(self.data("show", req["id"])["state"], "failed")
 
     def test_shebang_and_piped_stdin(self):
         script = Path(self.temp.name) / "script"
@@ -176,7 +181,7 @@ class Integration(unittest.TestCase):
         (script.parent / "adjacent").write_text(" adjacent")
         req = self.request(str(script), "--not-an-agsudo-option")
         self.approve(req)
-        p = self.call("exec", "--request", req["id"], input="input\n")
+        p = self.run_again(req, input="input\n")
         self.assertEqual(p.stdout, "input\narg:--not-an-agsudo-option adjacent")
 
     def process(self, *args, executable=CLI):
@@ -203,7 +208,7 @@ class Integration(unittest.TestCase):
             if process is not None and process.poll() is not None:
                 stdout, stderr = process.communicate(timeout=3)
                 self.fail(f"process exited with {process.returncode}: {stdout}{stderr}")
-            requests = self.data("review")["requests"]
+            requests = self.data("review")
             if requests:
                 return requests[-1]
             time.sleep(0.02)
@@ -215,9 +220,10 @@ class Integration(unittest.TestCase):
 
     def test_ctrl_c_cancels_but_timeouts_resume(self):
         p, rid = self.start_waiting("exec", "--", "true")
+        self.assertIn(rid, p.stderr.readline())  # The wait hint: the helper handles signals now.
         p.send_signal(signal.SIGINT)
         self.assertEqual(p.communicate(timeout=10)[1], f"agsudo: canceled {rid}; command was not started\n")
-        self.assertEqual(self.data("status", rid)["state"], "canceled")
+        self.assertEqual(self.data("show", rid)["state"], "canceled")
         self.assertNotEqual(self.call("approve", rid, check=False).returncode, 0)
         target = Path(self.temp.name) / "out.txt"
         piped = f"printf data | sudo tee {target}"
@@ -227,11 +233,11 @@ class Integration(unittest.TestCase):
             _, stderr = p.communicate(timeout=10)
             if sig == signal.SIGTERM:
                 self.assertIn(f"{rid} awaits approval", stderr)
-            self.approve(self.data("status", rid))
+            self.approve(self.data("show", rid))
             # Running the same command again reuses the request, pipe included.
             again = self.call("wrap", "--session", "host", "--", "sh", "-c", piped)
             self.assertEqual((again.stdout, target.read_text()), ("data", "data"))
-            self.assertEqual(self.data("status", rid)["state"], "exited")
+            self.assertEqual(self.data("show", rid)["state"], "exited")
 
     def test_wrap_intercepts_sudo_and_preserves_args(self):
         p, rid = self.start_waiting("wrap", "--", "sh", "-c", "sudo printf '%s' --json")
@@ -265,7 +271,7 @@ class Integration(unittest.TestCase):
     def test_noninteractive_and_json_usage(self):
         p = self.call("wrap", "--", "sudo", "-n", "true", check=False)
         self.assertEqual(p.returncode, 1)
-        self.assertEqual(self.data("review", "--all")["requests"], [])
+        self.assertEqual(self.data("review", "--all"), [])
         # Like sudo -n, an existing approval runs without waiting.
         self.approve(self.request("printf", "ok", options=("--session", "n")))
         self.assertEqual(self.call("wrap", "--session", "n", "--", "sudo", "-n", "printf", "ok").stdout, "ok")
@@ -279,7 +285,7 @@ class Integration(unittest.TestCase):
     def test_sudo_help_is_the_requester_guide(self):
         p = self.call("wrap", "--", "sh", "-c", "sudo --help")
         self.assertIn("run the same command again", p.stdout)
-        self.assertEqual(p.stdout, self.call("wrap", "--", "sh", "-c", "agsudo help --requester").stdout)
+        self.assertIn(p.stdout.strip(), self.call("exec", "--help").stdout)
 
     def test_wait_hint_once_and_no_hint_during_execution(self):
         p, rid = self.start_waiting("wrap", "--", "sudo", "true")
@@ -288,12 +294,12 @@ class Integration(unittest.TestCase):
         self.assertEqual(hint, f"sudo: waiting for approval of {rid}; see 'sudo --help'\n")
         # No periodic notices; approval should start the original command.
         self.assertFalse(select.select([p.stderr], [], [], 2.2)[0])
-        self.approve(self.data("status", rid))
+        self.approve(self.data("show", rid))
         stdout, stderr = p.communicate(timeout=10)
         self.assertEqual((p.returncode, stdout, stderr), (0, "", ""))
         req = self.request("sh", "-c", "sleep 2.2; exit 127")
         self.approve(req)
-        result = self.call("exec", "--request", req["id"], check=False)
+        result = self.run_again(req, check=False)
         self.assertEqual((result.returncode, result.stderr), (127, ""))
 
     def test_host_hooks_route_scripts_without_wrap(self):
@@ -334,15 +340,15 @@ class Integration(unittest.TestCase):
                 self.call("integration", "uninstall", host)
 
     def test_live_event_stream_and_resume(self):
-        p = self.process("watch", "--json", "--after", "0")
+        p = self.process("--json", "events", "--follow")
         req = self.request("true")
         self.assertTrue(select.select([p.stdout], [], [], 10)[0])
         event = json.loads(p.stdout.readline())
-        self.assertEqual((event["type"], event["request_id"]), ("request.created", req["id"]))
+        self.assertEqual((event["type"], event["request"]["id"]), ("request.created", req["id"]))
         p.send_signal(signal.SIGINT)
         p.communicate(timeout=10)
         self.approve(req)
-        p = self.process("watch", "--json", "--after", str(event["sequence"]))
+        p = self.process("--json", "events", "--follow", "--after", str(event["sequence"]))
         self.assertTrue(select.select([p.stdout], [], [], 10)[0])
         event = json.loads(p.stdout.readline())
         self.assertEqual(event["type"], "request.approved")
@@ -358,7 +364,7 @@ class Integration(unittest.TestCase):
         tty.until("APPROVE id")
         tty.send("looks good\r")
         deadline = time.monotonic() + 10
-        while self.data("status", req["id"])["state"] != "approved":
+        while self.data("show", req["id"])["state"] != "approved":
             self.assertLess(time.monotonic(), deadline)
             time.sleep(0.1)
         tty.send("q")
@@ -367,7 +373,7 @@ class Integration(unittest.TestCase):
     def test_interactive_shell_ctrl_c_and_job_control(self):
         req = self.request("bash")
         self.approve(req)
-        tty = Terminal(["exec", "--request", req["id"]], self.env)
+        tty = Terminal(["exec", "--", "bash"], self.env)
         self.addCleanup(tty.close)
         tty.send("printf 'AGREADY:%s\\n' \"$(id -u)\"\r")
         tty.until(f"AGREADY:{os.getuid()}\r\n")
@@ -384,7 +390,7 @@ class Integration(unittest.TestCase):
         tty.until("32 110\r\n")
         tty.send("exit 17\r")
         self.assertEqual(tty.wait(), 17)
-        self.assertEqual(self.data("status", req["id"])["exit_code"], 17)
+        self.assertEqual(self.data("show", req["id"])["exit_code"], 17)
 
 
 if __name__ == "__main__":

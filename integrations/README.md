@@ -58,7 +58,7 @@ not lift a host sandbox's restriction on setuid execution.
 ## Sessions and limitations
 
 Both integrations export `AGSUDO_SESSION` from the host session ID and make
-`sudo` and `agsudo` available through PATH; `agsudo help --requester` shows how
+`sudo` and `agsudo` available through PATH; `sudo --help` shows how
 an agent lists its session's requests and continues after a host times out a
 waiting sudo. Inside these sessions an agent cannot approve its own requests.
 

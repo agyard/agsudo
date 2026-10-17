@@ -3,6 +3,7 @@ package helper
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -61,6 +62,24 @@ func securePath(path string, uid uint32) error {
 	}
 	return nil
 }
+
+// decodeOne reads exactly one JSON value of at most limit bytes, rejecting
+// unknown fields and trailing data.
+func decodeOne(r io.Reader, limit int, v any) error {
+	b, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err == nil && len(b) > limit {
+		err = fmt.Errorf("larger than %d bytes", limit)
+	}
+	if err != nil {
+		return err
+	}
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	if err = d.Decode(v); err == nil && d.Decode(new(any)) != io.EOF {
+		err = errors.New("trailing data")
+	}
+	return err
+}
 func loadProduction() (Config, error) {
 	c := defaults()
 	if os.Geteuid() != 0 {
@@ -75,26 +94,14 @@ func loadProduction() (Config, error) {
 	}
 	defer f.Close()
 	st, err := f.Stat()
+	if err == nil && !st.Mode().IsRegular() {
+		err = errors.New("not a regular file")
+	}
+	if err == nil {
+		err = decodeOne(f, 64<<10, &c)
+	}
 	if err != nil {
-		return c, err
-	}
-	if !st.Mode().IsRegular() || st.Size() > 65536 {
-		return c, api.Err("configuration", "configuration must be a regular file under 64 KiB")
-	}
-	b, err := io.ReadAll(io.LimitReader(f, 65537))
-	if err != nil {
-		return c, err
-	}
-	if len(b) > 65536 {
-		return c, api.Err("configuration", "configuration exceeds 64 KiB")
-	}
-	d := json.NewDecoder(bytes.NewReader(b))
-	d.DisallowUnknownFields()
-	if err = d.Decode(&c); err != nil {
-		return c, err
-	}
-	if d.Decode(new(any)) != io.EOF {
-		return c, api.Err("configuration", "configuration contains trailing data")
+		return c, api.Err("configuration", "%s: %v", ConfigPath, err)
 	}
 	if c.DefaultTTLSeconds < 1 || c.MaxTTLSeconds < c.DefaultTTLSeconds || c.MaxTTLSeconds > 86400 {
 		return c, api.Err("configuration", "TTL must satisfy 1 <= default <= max <= 86400 seconds")

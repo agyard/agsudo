@@ -51,29 +51,34 @@ sed -i 's/"allowed_uids": \[1000\]/"allowed_uids": [1000, 1001]/' /etc/agsudo/co
             self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
         return p
 
+    def helper_run(self, request_id, uid=1000):
+        # The internal entry point that exec replaces itself with.
+        return subprocess.run(["docker", "exec", "-u", str(uid), "-w", "/tmp", self.name, "/usr/local/libexec/agsudo-helper", "run", request_id],
+                              capture_output=True, text=True, timeout=15)
+
     def request(self, *args, uid=1000, options=()):
-        return json.loads(self.call("request", "--json", *options, "--", *args, uid=uid).stdout)["data"]
+        return json.loads(self.call("request", "--json", *options, "--", *args, uid=uid).stdout)
 
     def test_real_elevation_and_clean_environment(self):
         req = self.request("sh", "-c", 'printf "uid="; id -u; printf "gid="; id -g; printf "env=%s,%s,%s" "$HOME" "$USER" "${AGSUDO_DEV_STATE-unset}"')
         self.assertEqual(req["owner_uid"], 1000)
         self.assertEqual(req["spec"]["target"]["uid"], 0)
         self.call("approve", req["id"], "--expect-digest", req["digest"])
-        p = self.call("exec", "--request", req["id"], env=(("AGSUDO_DEV_STATE", "/tmp/attacker-db"),))
+        p = self.call("exec", "--", *req["spec"]["argv"], env=(("AGSUDO_DEV_STATE", "/tmp/attacker-db"),))
         self.assertEqual(p.stdout, "uid=0\ngid=0\nenv=/root,root,unset")
-        self.assertNotEqual(self.call("exec", "--request", req["id"], check=False).returncode, 0)
+        self.assertEqual(self.helper_run(req["id"]).returncode, 1)
 
     def test_different_target_drops_groups_and_uid(self):
         req = self.request("sh", "-c", 'id -u; id -g; id -G; printf "%s" "$HOME"', options=("-u", "other"))
         self.call("approve", req["id"], "--expect-digest", req["digest"])
-        p = self.call("exec", "--request", req["id"])
+        p = self.call("exec", "-u", "other", "--", *req["spec"]["argv"])
         self.assertEqual(p.stdout, "1001\n1001\n1001\n/home/other")
 
     def test_access_is_kernel_uid_not_cli_metadata(self):
         req = self.request("id")
         p = self.call("show", req["id"], "--json", uid=1001, check=False)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "not_found")
-        p = self.call("approve", req["id"], "--expect-digest", req["digest"], "--actor", "root", "--json", uid=1001, check=False)
+        p = self.call("approve", req["id"], "--expect-digest", req["digest"], "--json", uid=1001, check=False)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "forbidden")
         p = self.call("doctor", "--json", uid=12345, check=False)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "forbidden")
@@ -82,9 +87,9 @@ sed -i 's/"allowed_uids": \[1000\]/"allowed_uids": [1000, 1001]/' /etc/agsudo/co
     def test_reviewer_can_approve_but_not_run_other_users_request(self):
         req = self.request("id", uid=1001)
         self.call("approve", req["id"], "--expect-digest", req["digest"])
-        p = self.call("exec", "--request", req["id"], check=False)
+        p = self.helper_run(req["id"])
         self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: only the requester can execute {req['id']}\n"))
-        p = self.call("exec", "--request", req["id"], uid=1001)
+        p = self.call("exec", "--", "id", uid=1001)
         self.assertIn("uid=0(root)", p.stdout)
 
     def test_root_state_files_remain_private(self):

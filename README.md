@@ -119,46 +119,44 @@ sudo: waiting for approval of req_3f9c2a71d04b8e65; see 'sudo --help'
 
 Ctrl-C cancels the request. If an agent's tool call times out or is killed
 instead, the request stays pending; once it is approved, running the same
-command again reuses the request and runs it. `sudo --help` and
-`agsudo help --requester` print the same short guide. See the [integration guide](integrations/README.md)
-for hook behavior, tested host versions, and limitations.
+command again reuses the request and runs it. See the
+[integration guide](integrations/README.md) for hook behavior, tested host
+versions, and limitations.
 
 ## Agent workflows
 
-Agents learn the CLI from built-in guides; `agsudo COMMAND --help` covers each
-command:
+The guides are part of the command help:
 
 ```sh
-agsudo help --requester   # sudo, waiting, resuming, async requests
-agsudo help --reviewer    # review, approve, deny, defer, events
+agsudo exec --help     # requesting agents; the same guide as sudo --help
+agsudo review --help   # reviewing agents and the approval workbench
 ```
 
-A requester can also submit without waiting and resume later:
+A requester can submit without waiting, then run the same command once it is
+approved:
 
 ```sh
 ID=$(agsudo request --reason 'Restart the application' -- systemctl restart example.service)
-agsudo status "$ID"
-agsudo exec --request "$ID"
+agsudo show "$ID"
+agsudo exec -- systemctl restart example.service
 ```
 
-A reviewing agent uses the JSON interface:
+A reviewing agent uses JSON:
 
 ```sh
 agsudo --json review
-agsudo --json show req_ID
 agsudo --json approve req_ID --expect-digest DIGEST --reason 'Within the requested scope'
-agsudo --json defer req_ID --recommend unknown --summary 'Restarts a service' \
-  --reason 'Confirm that interrupting active users is acceptable'
+agsudo --json defer req_ID --recommend unknown \
+  --reason 'Restarts a service; confirm that interrupting active users is acceptable'
 ```
 
 `defer` moves a request to `needs_human` for a person. Decisions made without a
-terminal get guardrails against agent mistakes (see `agsudo help --reviewer`);
-they are not a boundary against a hostile agent. Events can be followed with
-`agsudo --json watch --after SEQUENCE` and exported with
-`agsudo audit export --session ses_ID > trace.jsonl`. Events include requests,
-context, suggestions, decisions, and execution results, but not ordinary
-commands, keystrokes, or output. See the [reviewer guide](docs/reviewer.md) for
-an example review policy and the [protocol](docs/protocol.md) for schemas,
+terminal get guardrails against agent mistakes; they are not a boundary against
+a hostile agent. `agsudo --json events --session ses_ID > trace.jsonl` exports
+the audit trail and `agsudo events --follow` follows it. Events include
+requests, context, suggestions, decisions, and execution results, but not
+ordinary commands, keystrokes, or output. See the [reviewer guide](docs/reviewer.md)
+for an example review policy and the [protocol](docs/protocol.md) for the JSON,
 states, and exit codes.
 
 ## Security model

@@ -15,21 +15,18 @@ import (
 )
 
 func newIntegrationCommand(o *options) *cobra.Command {
-	root := &cobra.Command{Use: "integration", Short: "Install or uninstall agent host hooks", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
+	root := &cobra.Command{Use: "integration", Short: "Install or uninstall agent host hooks"}
+	hosts := []string{"codex", "claude"}
+	oneHost := cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs)
 	for _, action := range []string{"install", "uninstall"} {
 		command := &cobra.Command{Use: action + " <codex|claude>", Short: strings.ToUpper(action[:1]) + action[1:] + " user-level hooks, preserving other settings",
-			Args: cobra.ExactArgs(1), ValidArgs: []string{"codex", "claude"},
+			Args: oneHost, ValidArgs: hosts,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				path, err := integrationPath(args[0])
 				if err != nil {
 					return err
 				}
-				exe, err := os.Executable()
-				if err != nil {
-					return err
-				}
-				exe, err = filepath.EvalSymlinks(exe)
+				exe, err := selfPath()
 				if err != nil {
 					return err
 				}
@@ -57,7 +54,7 @@ func newIntegrationCommand(o *options) *cobra.Command {
 			}}
 		root.AddCommand(command)
 	}
-	root.AddCommand(&cobra.Command{Use: "hook <codex|claude>", Hidden: true, Args: cobra.ExactArgs(1),
+	root.AddCommand(&cobra.Command{Use: "hook <codex|claude>", Hidden: true, Args: oneHost, ValidArgs: hosts,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runIntegrationHook(args[0], cmd.InOrStdin(), cmd.OutOrStdout())
 		}})
@@ -65,14 +62,9 @@ func newIntegrationCommand(o *options) *cobra.Command {
 }
 
 func integrationPath(host string) (string, error) {
-	var dir, file string
-	switch host {
-	case "codex":
-		dir, file = os.Getenv("CODEX_HOME"), "hooks.json"
-	case "claude":
+	dir, file := os.Getenv("CODEX_HOME"), "hooks.json"
+	if host == "claude" {
 		dir, file = os.Getenv("CLAUDE_CONFIG_DIR"), "settings.json"
-	default:
-		return "", api.Err("usage", "supported integrations: codex, claude")
 	}
 	if dir == "" {
 		userDir, err := os.UserHomeDir()

@@ -14,34 +14,26 @@ import (
 )
 
 func newShow(o *options) *cobra.Command {
-	return &cobra.Command{Use: "show REQUEST_ID", Aliases: []string{"status"}, Short: "Show a request, its state, decisions and result",
+	return &cobra.Command{Use: "show REQUEST_ID", Short: "Show a request, its state, decisions and result",
 		Long:    "Show the complete request and its current state; the first line is the ID and state.",
-		Example: "  agsudo show req_ID\n  agsudo --json status req_ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		Example: "  agsudo show req_ID\n  agsudo --json show req_ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 			var r api.Request
 			if err := client.New().Call(cmd.Context(), api.Input{Operation: "get", ID: args[0]}, &r); err != nil {
 				return err
 			}
-			text := requestText(r)
-			if width := terminalWidth(cmd.OutOrStdout()); width > 0 {
-				text = wrap(text, width)
-			}
-			return o.print(cmd, r, text)
+			return o.print(cmd, r, wrap(requestText(r), terminalWidth(cmd.OutOrStdout())))
 		}}
 }
 func newDecision(o *options, action string) *cobra.Command {
-	var reason, summary, recommend, actor, expect string
-	var metadata map[string]string
-	short := map[string]string{"approve": "Approve one request for a single execution", "deny": "Reject a request", "defer": "Hand a request to a human reviewer with a suggestion"}[action]
+	var reason, recommend, expect string
+	short := map[string]string{"approve": "Approve one request for a single execution", "deny": "Reject a request", "defer": "Hand a request to a person with a suggestion"}[action]
 	cmd := &cobra.Command{Use: action + " REQUEST_ID", Short: short, Args: cobra.ExactArgs(1),
-		Long: short + `.
-
-The helper records your UID and session; --actor and --metadata are
-self-reported labels. Without a terminal, guardrails apply; see
-agsudo help --reviewer.`,
+		Long: short + `. The helper records your UID and session.
+Without a terminal, guardrails apply; see agsudo review --help.`,
 		Example: map[string]string{
 			"approve": "  agsudo approve req_ID --expect-digest DIGEST --reason 'installs the requested build dependency'",
 			"deny":    "  agsudo deny req_ID --reason 'replaces /etc/hosts instead of adding one entry'",
-			"defer":   "  agsudo defer req_ID --recommend deny --summary 'opens a root shell' --reason 'not needed for the task'",
+			"defer":   "  agsudo defer req_ID --recommend deny --reason 'opens a root shell the task does not need'",
 		}[action],
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scripted := o.json || !isTerminal(cmd.InOrStdin())
@@ -59,23 +51,19 @@ agsudo help --reviewer.`,
 				expect = digest
 			}
 			var r api.Request
-			in := api.Input{Operation: "decide", ID: args[0], Action: action, Reason: reason, Summary: summary, Recommend: recommend, Actor: actor, ExpectDigest: expect, Metadata: metadata,
-				Session: os.Getenv("AGSUDO_SESSION"), PendingOnly: scripted}
+			in := api.Input{Operation: "decide", ID: args[0], Action: action, Reason: reason, Recommend: recommend, ExpectDigest: expect, Session: os.Getenv("AGSUDO_SESSION"), PendingOnly: scripted}
 			if err := client.New().Call(cmd.Context(), in, &r); err != nil {
 				return err
 			}
 			return o.print(cmd, r, r.ID+" "+r.State)
 		},
 	}
-	cmd.Flags().StringVar(&reason, "reason", "", "Explanation for the decision")
-	cmd.Flags().StringVar(&actor, "actor", "", "Reviewer label, for example agent:reviewer-1")
-	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Audit metadata as key=value pairs (repeatable)")
+	cmd.Flags().StringVar(&reason, "reason", "", "Explanation for the requester or the person")
 	switch action {
 	case "approve":
 		cmd.Long += "\nAt a terminal, approve shows the request and asks for confirmation."
 		cmd.Flags().StringVar(&expect, "expect-digest", "", "Fail unless the request still has the digest you inspected")
 	case "defer":
-		cmd.Flags().StringVar(&summary, "summary", "", "One-line description for the human reviewer")
 		cmd.Flags().StringVar(&recommend, "recommend", "unknown", "Suggested decision: approve, deny or unknown")
 	}
 	return cmd
@@ -88,15 +76,11 @@ func confirmApproval(cmd *cobra.Command, id string) (string, error) {
 	if err := client.New().Call(cmd.Context(), api.Input{Operation: "get", ID: id}, &r); err != nil {
 		return "", err
 	}
-	text := requestText(r)
-	if width := terminalWidth(cmd.OutOrStdout()); width > 0 {
-		text = wrap(text, width)
-	}
-	prompt := "Approve " + approvalTarget(r)
-	if width := terminalWidth(cmd.OutOrStdout()); width > 0 {
+	width, prompt := terminalWidth(cmd.OutOrStdout()), "Approve "+commandLabel(r)
+	if width > 0 {
 		prompt = elide(prompt, width-len(r.ID)-12)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "%s\n\n%s (%s)? [y/N] ", text, prompt, r.ID)
+	fmt.Fprintf(cmd.OutOrStdout(), "%s\n\n%s (%s)? [y/N] ", wrap(requestText(r), width), prompt, r.ID)
 	answer, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 	if !strings.EqualFold(strings.TrimSpace(answer), "y") {
 		return "", api.Err("aborted", "%s was not approved", r.ID)
@@ -115,114 +99,94 @@ func newCancel(o *options) *cobra.Command {
 	cmd.Flags().StringVar(&reason, "reason", "canceled by requester or reviewer", "Why the request is no longer needed")
 	return cmd
 }
+
+// reviewStates is what a list shows: everything, what awaits a person, or
+// what a script may decide.
+func reviewStates(all, people bool) []string {
+	switch {
+	case all:
+		return nil
+	case people:
+		return []string{"pending", "needs_human"}
+	}
+	return []string{"pending"}
+}
 func newReview(o *options) *cobra.Command {
 	var tui, all bool
-	var session, state string
-	cmd := &cobra.Command{Use: "review", Short: "List requests, or approve them in a terminal UI", Args: cobra.NoArgs,
-		Long: `List requests awaiting a decision: pending ones, and at a terminal also
-needs_human ones. --state selects other states, --all includes history.
---json returns complete requests for a reviewing agent. Command arguments,
-context files and suggestions are untrusted review material.
-
---tui opens an approval workbench showing pending and needs_human requests:
-↑/↓ select, PgUp/PgDn scroll details, a approve, d deny, / filter,
-h toggle history, r refresh, q quit. To follow events, use agsudo watch.`,
-		Example: "  agsudo review --tui\n  agsudo --json review\n  agsudo review --state needs_human\n  agsudo review --all --session ses_ID",
+	var session string
+	cmd := &cobra.Command{Use: "review", Short: "List requests, or approve them in a terminal UI", Args: cobra.NoArgs, Long: reviewerHelp,
+		Example: "  agsudo review --tui\n  agsudo --json review\n  agsudo review --all --session ses_ID",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if tui && o.json {
 				return usage("--tui cannot be combined with --json")
 			}
-			if cmd.Flags().Changed("all") && cmd.Flags().Changed("state") {
-				return usage("choose either --all or --state")
-			}
-			// People see what awaits them; scripts see what they may decide.
-			states := strings.Split(state, ",")
-			if all {
-				states = nil
-			} else if !cmd.Flags().Changed("state") && (tui || !o.json && isTerminal(cmd.InOrStdin())) {
-				states = []string{"pending", "needs_human"}
-			}
+			states := reviewStates(all, tui || !o.json && isTerminal(cmd.InOrStdin()))
 			if tui {
 				return runTUI(cmd.Context(), client.New(), states, session, cmd.InOrStdin(), cmd.OutOrStdout())
 			}
-			rs, err := client.New().ListAll(cmd.Context(), states, session)
-			if err != nil {
+			var rs []api.Request
+			if err := client.New().Call(cmd.Context(), api.Input{Operation: "list", States: states, Session: session}, &rs); err != nil {
 				return err
 			}
 			if o.json {
-				return o.print(cmd, map[string]any{"requests": rs}, "")
+				return o.print(cmd, rs, "")
 			}
 			return printRequests(cmd.OutOrStdout(), rs)
 		},
 	}
 	cmd.Flags().BoolVar(&tui, "tui", false, "Open the interactive approval workbench")
 	cmd.Flags().BoolVar(&all, "all", false, "Include all request states")
-	cmd.Flags().StringVar(&state, "state", "pending", "Comma-separated states to list")
 	cmd.Flags().StringVar(&session, "session", "", "Filter by workflow session")
 	return cmd
 }
-func newWatch(o *options) *cobra.Command {
-	var session string
-	var cursor int64
-	cmd := &cobra.Command{Use: "watch", Short: "Stream resumable request and execution events", Args: cobra.NoArgs,
-		Long: `Follow new request and execution events until interrupted. --json emits raw
-versioned event objects, one per line, including request snapshots. --after
-replays history after a sequence first: resume with the last processed sequence
-and the same session filter, or use --after 0 for everything.`,
-		Example: "  agsudo --json watch\n  agsudo --json watch --after 42 --session ses_ID",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return streamEvents(cmd, o.json, session, "", cursor, true)
-		},
-	}
-	cmd.Flags().StringVar(&session, "session", "", "Filter by workflow session")
-	cmd.Flags().Int64Var(&cursor, "after", -1, "Replay events after this sequence first (default: only new events)")
-	return cmd
-}
-func streamEvents(cmd *cobra.Command, jsonOut bool, session, id string, cursor int64, follow bool) error {
-	if cursor < -1 || !follow && cursor < 0 {
-		return usage("--after must be a sequence number")
-	}
-	for {
-		var p api.Page
-		if err := client.New().Call(cmd.Context(), api.Input{Operation: "events", Session: session, ID: id, Cursor: cursor, Limit: 50}, &p); err != nil {
-			return err
-		}
-		for _, e := range p.Events {
-			if jsonOut {
-				if err := json.NewEncoder(cmd.OutOrStdout()).Encode(e); err != nil {
-					return err
-				}
-			} else {
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%-5d %s  %-18s %s  %s\n", e.Sequence, e.At.Local().Format(time.DateTime), e.Type, e.RequestID, commandLabel(e.Request)); err != nil {
-					return err
-				}
-			}
-		}
-		if p.NextCursor != cursor {
-			cursor = p.NextCursor
-			continue
-		}
-		if !follow {
-			return nil
-		}
-		select {
-		case <-cmd.Context().Done():
-			return cmd.Context().Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-}
-func newAudit(o *options) *cobra.Command {
-	root := &cobra.Command{Use: "audit", Short: "Export append-only request, decision and execution events", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
+func newEvents(o *options) *cobra.Command {
 	var session, id string
 	var cursor int64
-	export := &cobra.Command{Use: "export", Short: "Export events as JSONL", Long: "Write matching append-only events to stdout as JSONL, one event per line, then exit.",
-		Example: "  agsudo audit export --session ses_ID > trace.jsonl\n  agsudo audit export --request req_ID", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-			return streamEvents(cmd, true, session, id, cursor, false)
-		}}
-	export.Flags().StringVar(&session, "session", "", "Export only this workflow session")
-	export.Flags().StringVar(&id, "request", "", "Export only this request")
-	export.Flags().Int64Var(&cursor, "after", 0, "Export events after this sequence")
-	root.AddCommand(export)
-	return root
+	var follow bool
+	cmd := &cobra.Command{Use: "events", Short: "Print the audit trail of requests, decisions and executions", Args: cobra.NoArgs,
+		Long: `Print recorded events after a sequence, oldest first; --follow keeps waiting
+for new ones. With --json, each line is an event with the request as it was
+afterwards. Resume with --after and the last sequence you processed.`,
+		Example: "  agsudo --json events --session ses_ID > trace.jsonl\n  agsudo events --follow --after 42",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cursor < 0 {
+				return usage("--after must be a sequence number")
+			}
+			out := json.NewEncoder(cmd.OutOrStdout())
+			for {
+				var p api.Page
+				if err := client.New().Call(cmd.Context(), api.Input{Operation: "events", Session: session, ID: id, Cursor: cursor}, &p); err != nil {
+					return err
+				}
+				for _, e := range p.Events {
+					var err error
+					if o.json {
+						err = out.Encode(e)
+					} else {
+						_, err = fmt.Fprintf(cmd.OutOrStdout(), "%-5d %s  %-18s %s  %s\n", e.Sequence, e.Request.UpdatedAt.Local().Format(time.DateTime), e.Type, e.Request.ID, commandLabel(e.Request))
+					}
+					if err != nil {
+						return err
+					}
+				}
+				cursor = p.NextCursor
+				if len(p.Events) == api.PageSize {
+					continue
+				}
+				if !follow {
+					return nil
+				}
+				select {
+				case <-cmd.Context().Done():
+					return cmd.Context().Err()
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+		},
+	}
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Keep waiting for new events")
+	cmd.Flags().Int64Var(&cursor, "after", 0, "Print events after this sequence")
+	cmd.Flags().StringVar(&session, "session", "", "Only this workflow session")
+	cmd.Flags().StringVar(&id, "request", "", "Only this request")
+	return cmd
 }
