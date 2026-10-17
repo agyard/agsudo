@@ -102,6 +102,7 @@ type Decision struct {
 	Summary   string            `json:"summary,omitempty"`
 	Recommend string            `json:"recommend,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	Session   string            `json:"session,omitempty"` // The decider's own workflow session.
 }
 type Request struct {
 	SchemaVersion int       `json:"schema_version"`

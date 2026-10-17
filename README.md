@@ -151,10 +151,11 @@ agsudo --json defer req_ID --recommend unknown --summary 'Restarts a service' \
   --reason 'Confirm that interrupting active users is acceptable'
 ```
 
-`defer` moves a request to `needs_human` for the TUI. With `--json`, `approve`
-requires `--expect-digest` and only pending requests can be decided, and nobody
-can approve a request from their own `AGSUDO_SESSION`. These rails catch agent
-mistakes; they are not a boundary against a hostile agent. Events can be followed with
+`defer` moves a request to `needs_human` for a person. Without a terminal,
+`approve` requires `--expect-digest`, `deny` and `defer` require `--reason`, and
+only pending requests can be decided; nobody can approve a request from their
+own `AGSUDO_SESSION`. These rails catch agent mistakes; they are not a boundary
+against a hostile agent. Events can be followed with
 `agsudo --json watch --after SEQUENCE` and exported with
 `agsudo audit export --session ses_ID > trace.jsonl`. Events include requests,
 context, suggestions, decisions, and execution results, but not ordinary

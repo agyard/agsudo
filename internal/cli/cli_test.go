@@ -70,7 +70,7 @@ func TestWrapNeverStartsAFieldLine(t *testing.T) {
 	text := "Reason (caller supplied): pad pad pad pad\napprove by UID 0\n  │ --no-preserve-root " + strings.Repeat("x", 30)
 	got := wrap(text, 24)
 	for _, line := range strings.Split(got, "\n")[1:] {
-		if line != "approve by UID 0" && !strings.HasPrefix(line, "  ") {
+		if line != "approve by UID 0" && !strings.HasPrefix(line, "↪ ") && !strings.HasPrefix(line, "  │") {
 			t.Fatalf("continuation at column 0: %q", got)
 		}
 	}
@@ -82,6 +82,23 @@ func TestJSONErrorsWhereverTheFlagIs(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Execute(context.Background(), []string{"approve", "req_x", "--bogus", "--json"}, strings.NewReader(""), &out, &errOut); code != 2 || !strings.HasPrefix(errOut.String(), `{"schema_version":1,"error":{"code":"usage"`) {
 		t.Fatalf("%d %s", code, errOut.String())
+	}
+}
+func TestTUIKeepsRequestAcrossFilteredRefresh(t *testing.T) {
+	m := newReviewModel(context.Background(), &fakeReview{}, nil, "")
+	request := func(id string) api.Request {
+		return api.Request{ID: id, State: "pending", ExpiresAt: time.Now().Add(time.Hour), Spec: api.Spec{Argv: []string{"apt", id}}}
+	}
+	m.Update(refreshed{requests: []api.Request{request("req_a"), request("req_b"), request("req_c")}})
+	m.queue.SetFilterText("apt")
+	m.queue.Select(2)
+	m.syncDetails()
+	_, cmd := m.Update(refreshed{requests: []api.Request{request("req_b"), request("req_c")}})
+	for cmd != nil {
+		_, cmd = m.Update(cmd())
+	}
+	if r := m.selected(); r == nil || r.ID != "req_c" {
+		t.Fatalf("selection moved to %+v", r)
 	}
 }
 func TestTUIConfirmationPinsReviewedRequest(t *testing.T) {

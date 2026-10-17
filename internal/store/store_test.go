@@ -287,9 +287,11 @@ func TestOnDemandExpiryAndQueueQuota(t *testing.T) {
 func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	s, _ := testStore(t)
 	r := create(t, s)
-	again, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: r.Spec})
+	explained := r.Spec
+	explained.Reason = "added a reason after reading the help"
+	again, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: explained})
 	if err != nil || again.ID != r.ID {
-		t.Fatalf("identical command created another request: %s %v", again.ID, err)
+		t.Fatalf("same command created another request: %s %v", again.ID, err)
 	}
 	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Session: r.Spec.Session})
 	code(t, err, "forbidden")
@@ -304,6 +306,19 @@ func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
 	}
 	if again, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: r.Spec}); err != nil || again.ID == r.ID {
 		t.Fatalf("a used request was reused: %v", err)
+	}
+	// A recent denial is reported again; after its deadline, a new request.
+	denied := create(t, s)
+	if _, err = s.Decide(testContext, denied.ID, owner, api.Decision{Action: "deny"}, Check{}); err != nil {
+		t.Fatal(err)
+	}
+	if again, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: denied.Spec}); err != nil || again.ID != denied.ID || again.State != "denied" {
+		t.Fatalf("denial not reported: %+v %v", again, err)
+	}
+	later := denied.ExpiresAt
+	s.Now = func() time.Time { return later }
+	if again, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: later.Add(time.Hour), Spec: denied.Spec}); err != nil || again.ID == denied.ID {
+		t.Fatalf("old denial blocked a new request: %v", err)
 	}
 }
 

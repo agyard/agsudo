@@ -142,7 +142,7 @@ class Integration(unittest.TestCase):
 
     def test_cancel_expiry_and_defer(self):
         req = self.request("id")
-        self.data("defer", req["id"], "--recommend", "approve", "--summary", "needs a person")
+        self.data("defer", req["id"], "--recommend", "approve", "--summary", "needs a person", "--reason", "unsure")
         self.assertEqual(self.data("review")["requests"], [])
         self.assertEqual(len(self.data("review", "--state", "needs_human")["requests"]), 1)
         self.call("cancel", req["id"])
@@ -152,7 +152,7 @@ class Integration(unittest.TestCase):
         time.sleep(1.05)
         self.assertEqual(self.data("status", req["id"])["state"], "expired")
         p = self.call("exec", "--request", req["id"], check=False)
-        self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: {req['id']} expired; command was not started\n"))
+        self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: {req['id']} is expired; command was not started\n"))
 
     def test_context_and_changed_executable(self):
         script = Path(self.temp.name) / "script"
@@ -250,10 +250,15 @@ class Integration(unittest.TestCase):
         p = self.call("--json", "approve", req["id"], "--expect-digest", req["digest"], check=False)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "forbidden")
         del self.env["AGSUDO_SESSION"]
-        self.data("defer", req["id"])
-        p = self.call("--json", "approve", req["id"], "--expect-digest", req["digest"], check=False)
-        self.assertIn("deferred to a person", json.loads(p.stderr)["error"]["message"])
-        self.assertEqual(self.call("approve", req["id"]).stdout, f"{req['id']} approved\n")
+        self.assertEqual(self.call("deny", req["id"], check=False).returncode, 2)
+        self.data("defer", req["id"], "--reason", "unsure")
+        p = self.call("approve", req["id"], "--expect-digest", req["digest"], check=False)
+        self.assertIn("deferred to a person", p.stderr)
+        # A person at a terminal decides needs_human requests.
+        tty = Terminal(["approve", req["id"]], self.env)
+        self.addCleanup(tty.close)
+        tty.until(f"{req['id']} approved")
+        self.assertEqual(tty.wait(), 0)
 
     def test_noninteractive_and_json_usage(self):
         p = self.call("wrap", "--", "sudo", "-n", "true", check=False)
@@ -266,17 +271,10 @@ class Integration(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("interactive terminal", p.stderr)
 
-    def test_wrap_sudo_directly(self):
-        p, rid = self.start_waiting("wrap", "--", "sudo", "printf", "%s", "wrapped")
-        self.approve(self.data("show", rid))
-        stdout, stderr = p.communicate(timeout=10)
-        self.assertEqual((p.returncode, stdout, stderr), (0, "wrapped", ""))
-
-    def test_sudo_help_discovers_async_workflow_and_shim(self):
+    def test_sudo_help_is_the_requester_guide(self):
         p = self.call("wrap", "--", "sh", "-c", "sudo --help")
-        self.assertIn("agsudo exec --request", p.stdout)
-        p = self.call("wrap", "--", "sh", "-c", "agsudo help --requester")
-        self.assertIn("agsudo request", p.stdout)
+        self.assertIn("run the same command again", p.stdout)
+        self.assertEqual(p.stdout, self.call("wrap", "--", "sh", "-c", "agsudo help --requester").stdout)
 
     def test_wait_hint_once_and_no_hint_during_execution(self):
         p, rid = self.start_waiting("wrap", "--", "sudo", "true")

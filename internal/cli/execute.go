@@ -94,10 +94,6 @@ func submit(ctx context.Context, e executionFlags, args []string, sudo bool) err
 			return err
 		}
 		e.id = r.ID
-		if ctx.Err() != nil {
-			_ = c.Call(context.Background(), api.Input{Operation: "cancel", ID: e.id, Reason: "interrupted while submitting"}, nil)
-			return ctx.Err()
-		}
 	}
 	return c.Exec(e.id, sudo)
 }
@@ -136,13 +132,8 @@ new request.`,
 				if e.id == "" {
 					return usage(cmd, "--request requires a nonempty request ID")
 				}
-				if len(args) != 0 {
-					return usage(cmd, "--request cannot replace any part of a submitted request")
-				}
-				for _, flag := range []string{"user", "context", "shell", "login", "reason", "session", "ttl"} {
-					if cmd.Flags().Changed(flag) {
-						return usage(cmd, "--request cannot be combined with --%s", flag)
-					}
+				if len(args) != 0 || cmd.Flags().NFlag() > 1 {
+					return usage(cmd, "--request runs a submitted request as it is; it takes no other options or command")
 				}
 			}
 			return usageError(cmd, submit(cmd.Context(), e, args, false))
@@ -269,13 +260,18 @@ func sudo(ctx context.Context, args []string, in io.Reader, out, errOut io.Write
 	f.SetOutput(io.Discard)
 	var e executionFlags
 	e.flags(f)
-	var help, version, home, nonInteractive, reset bool
+	var help, version, home, nonInteractive, reset, preserve bool
 	f.BoolVarP(&help, "help", "h", false, "")
 	f.BoolVarP(&version, "version", "V", false, "")
 	f.BoolVarP(&home, "set-home", "H", false, "")
 	f.BoolVarP(&nonInteractive, "non-interactive", "n", false, "")
 	f.BoolVarP(&reset, "reset-timestamp", "k", false, "")
-	if err := f.Parse(args); err != nil {
+	f.BoolVarP(&preserve, "preserve-env", "E", false, "")
+	err := f.Parse(args)
+	if err == nil && preserve {
+		err = errors.New("the environment is always sanitized; pass variables with: sudo env NAME=VALUE COMMAND")
+	}
+	if err != nil {
 		return report(api.Err("usage", "%v; see 'sudo --help'", err), false, errOut, "sudo")
 	}
 	switch {
@@ -291,7 +287,7 @@ func sudo(ctx context.Context, args []string, in io.Reader, out, errOut io.Write
 		fmt.Fprintln(errOut, "sudo: approval required; -n does not wait (submit with 'agsudo request', see 'sudo --help')")
 		return 1
 	}
-	err := submit(ctx, e, f.Args(), true)
+	err = submit(ctx, e, f.Args(), true)
 	var usageErr *api.Error
 	if errors.As(err, &usageErr) && usageErr.Code == "usage" {
 		err = api.Err("usage", "%s; see 'sudo --help'", usageErr.Message)

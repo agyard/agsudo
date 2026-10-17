@@ -245,16 +245,16 @@ func updateIntegration(path, host, exe string, install bool) (bool, error) {
 	if err != nil || bytes.Equal(before, after) {
 		return false, err
 	}
-	data, err := json.MarshalIndent(root, "", "  ")
-	if err != nil {
-		return false, err
-	}
 	tmp, err := os.CreateTemp(dir, ".agsudo-config-*")
 	if err != nil {
 		return false, err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err = tmp.Write(append(data, '\n')); err == nil {
+	// Keep shell commands such as "a && b" readable in the user's config.
+	enc := json.NewEncoder(tmp)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err = enc.Encode(root); err == nil {
 		err = tmp.Sync()
 	}
 	if closeErr := tmp.Close(); err == nil {

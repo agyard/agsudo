@@ -48,15 +48,19 @@ func commandLabel(r api.Request) string {
 	return command(r)
 }
 
+// prose renders caller text on one line with single spaces, so neither line
+// breaks nor long runs of spaces can make it imitate other fields.
+func prose(s string) string { return strings.Join(strings.Fields(api.Safe(s, false)), " ") }
+
 // wrap breaks lines at spaces, never inside a command argument such as
-// --no-preserve-root, and indents continuations, so wrapped untrusted text can
-// never start a line the way a field does. Text must already be sanitized.
+// --no-preserve-root, and marks continuations with ↪, so wrapped untrusted
+// text never starts a line the way a field does. Text must be sanitized.
 func wrap(text string, width int) string {
 	var lines []string
 	for _, line := range strings.Split(text, "\n") {
 		body := strings.TrimLeft(line, " │")
 		prefix, current := line[:len(line)-len(body)], ""
-		next := prefix + "  "
+		next := prefix + "↪ "
 		for i, word := range strings.Split(body, " ") {
 			switch {
 			case i == 0:
@@ -79,10 +83,15 @@ func wrap(text string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+func isTerminal(f any) bool {
+	file, ok := f.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+
 // terminalWidth is the width of out if it is a terminal, otherwise 0.
 func terminalWidth(out io.Writer) int {
-	if file, ok := out.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
-		if cols, _, err := term.GetSize(int(file.Fd())); err == nil {
+	if isTerminal(out) {
+		if cols, _, err := term.GetSize(int(out.(*os.File).Fd())); err == nil {
 			return cols
 		}
 	}
@@ -100,7 +109,7 @@ func requestText(r api.Request) string {
 	field("Requester", fmt.Sprintf("UID %d, GID %d", r.OwnerUID, r.OwnerGID))
 	field("Command", command(r))
 	if r.Spec.Scope == "shell_session" {
-		field("Scope", "interactive shell; commands run inside it are not reviewed")
+		field("Scope", "shell; everything it runs, typed or piped in, is authorized without review")
 	}
 	field("Executable", api.Safe(r.Spec.Executable, false))
 	field("Directory", api.Safe(r.Spec.Cwd, false))
@@ -113,18 +122,13 @@ func requestText(r api.Request) string {
 		field("Expires", when(r.ExpiresAt)+" (expired)")
 	}
 	field("Digest", r.Digest)
-	if r.Detached {
-		field("Submission", "agsudo request; runs only after agsudo exec --request")
-	} else {
-		field("Submission", "sudo or agsudo exec; starts on approval if still waiting")
-	}
-	// Free text stays on one line, so it cannot imitate other fields.
-	field("Reason (caller supplied)", api.Safe(r.Spec.Reason, false))
+	field("Reason (caller supplied)", prose(r.Spec.Reason))
 	for _, d := range []*api.Decision{r.Suggestion, r.Decision} {
 		if d != nil {
-			fmt.Fprintf(&b, "\n%s by UID %d at %s %s\n", d.Action, d.Actor.UID, when(d.At), api.Safe(d.Actor.Label, false))
-			field("Summary", api.Safe(d.Summary, false))
-			field("Reason", api.Safe(d.Reason, false))
+			fmt.Fprintf(&b, "\n%s by UID %d at %s %s\n", d.Action, d.Actor.UID, when(d.At), prose(d.Actor.Label))
+			field("From session", api.Safe(d.Session, false))
+			field("Summary", prose(d.Summary))
+			field("Reason", prose(d.Reason))
 			if d.Action == "defer" {
 				field("Recommendation", d.Recommend)
 			}
@@ -133,7 +137,7 @@ func requestText(r api.Request) string {
 	if r.ExitCode != nil {
 		field("Exit status", strconv.Itoa(*r.ExitCode))
 	}
-	field(map[bool]string{true: "Canceled", false: "Failure"}[r.State == "canceled"], api.Safe(r.Failure, false))
+	field(map[bool]string{true: "Canceled", false: "Failure"}[r.State == "canceled"], prose(r.Failure))
 	b.WriteString("\nEnvironment (sanitized):\n")
 	for _, value := range r.Spec.Environment {
 		fmt.Fprintf(&b, "  %s\n", api.Safe(value, false))
@@ -151,7 +155,7 @@ func printRequests(out io.Writer, requests []api.Request) error {
 	}
 	rows := [][]string{{"REQUEST", "STATE", "TARGET", "COMMAND", "REASON"}}
 	for _, r := range requests {
-		rows = append(rows, []string{r.ID, r.State, api.Safe(r.Spec.Target.Name, false), commandLabel(r), api.Safe(r.Spec.Reason, false)})
+		rows = append(rows, []string{r.ID, r.State, api.Safe(r.Spec.Target.Name, false), commandLabel(r), prose(r.Spec.Reason)})
 	}
 	var w [5]int
 	for _, row := range rows {

@@ -15,33 +15,26 @@ const approvalNoticeDelay = 2 * time.Second
 
 // Presentation is chosen by the entry point. Decisions always use the same
 // wait loop; no child output is intercepted or rewritten.
-type executionUI struct{ sudo bool }
+type executionUI struct{ prefix, help string }
 
-func (u executionUI) help() string {
-	if u.sudo {
-		return "sudo --help"
-	}
-	return "agsudo help --requester"
-}
 func (u executionUI) message(format string, args ...any) {
-	prefix := "agsudo"
-	if u.sudo {
-		prefix = "sudo"
-	}
-	fmt.Fprintf(os.Stderr, "%s: %s\n", prefix, api.Safe(fmt.Sprintf(format, args...), false))
+	fmt.Fprintf(os.Stderr, "%s: %s\n", u.prefix, api.Safe(fmt.Sprintf(format, args...), false))
 }
 
 // interrupt ends a wait. A keyboard interrupt means "never mind", as at a sudo
 // password prompt; timeouts, hangups and kills leave the request to be run again.
-func interrupt(ctx context.Context, s *store.Store, a store.Access, id string, sig os.Signal, ui executionUI) int {
-	if sig == syscall.SIGINT || sig == syscall.SIGQUIT {
-		if _, err := s.Cancel(ctx, id, a, "interrupted while waiting for approval"); err != nil {
-			ui.message("cancel %s: %v", id, err)
+func interrupt(ctx context.Context, s *store.Store, a store.Access, r api.Request, sig os.Signal, ui executionUI) int {
+	switch {
+	case sig == syscall.SIGINT || sig == syscall.SIGQUIT:
+		if _, err := s.Cancel(ctx, r.ID, a, "interrupted while waiting for approval"); err != nil {
+			ui.message("cancel %s: %v", r.ID, err)
 		} else {
-			ui.message("canceled %s; command was not started", id)
+			ui.message("canceled %s; command was not started", r.ID)
 		}
-	} else {
-		ui.message("stopped waiting; %s stays pending until it expires. Once it is approved, run the same command again", id)
+	case r.State == "approved":
+		ui.message("stopped before starting %s; it is still approved, so run the same command again to run it.", r.ID)
+	default:
+		ui.message("stopped waiting; %s stays pending until it expires. Once it is approved (agsudo review --tui), run the same command again.", r.ID)
 	}
 	return 128 + int(sig.(syscall.Signal))
 }
@@ -73,11 +66,11 @@ func waitForApproval(ctx context.Context, s *store.Store, a store.Access, id str
 			}
 			ui.message("%s was denied%s", id, reason)
 			return r, 1, false
-		case "expired":
-			ui.message("%s expired; command was not started", id)
+		case "expired", "canceled":
+			ui.message("%s is %s; command was not started", id, r.State)
 			return r, 1, false
-		case "canceled":
-			ui.message("%s was canceled; command was not started", id)
+		case "running":
+			ui.message("%s is already running in another process", id)
 			return r, 1, false
 		default:
 			ui.message("%s has already run (%s); run the command again to submit a new request", id, r.State)
@@ -85,9 +78,9 @@ func waitForApproval(ctx context.Context, s *store.Store, a store.Access, id str
 		}
 		select {
 		case sig := <-signals:
-			return r, interrupt(ctx, s, a, id, sig, ui), false
+			return r, interrupt(ctx, s, a, r, sig, ui), false
 		case <-notice:
-			ui.message("waiting for approval of %s; see '%s'", id, ui.help())
+			ui.message("waiting for approval of %s; see '%s'", id, ui.help)
 		case <-tick.C:
 		}
 	}

@@ -59,10 +59,8 @@ not lift a host sandbox's restriction on setuid execution.
 
 Both integrations export `AGSUDO_SESSION` from the host session ID and make
 `sudo` and `agsudo` available through PATH; `agsudo help --requester` shows how
-an agent lists its session's requests. When a host times out a waiting sudo, the
-request stays pending; once approved, running the same command again in the
-session reuses it, including any input piped to it. Inside these sessions an
-agent cannot approve its own requests with `agsudo approve`.
+an agent lists its session's requests and continues after a host times out a
+waiting sudo. Inside these sessions an agent cannot approve its own requests.
 
 Shells can still change PATH, define sudo functions, or invoke absolute paths
 such as `/usr/bin/sudo`; the integrations do not cover these cases. Codex may

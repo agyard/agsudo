@@ -31,25 +31,33 @@ func newDecision(o *options, action string) *cobra.Command {
 	var metadata map[string]string
 	short := map[string]string{"approve": "Approve one request for a single execution", "deny": "Reject a request", "defer": "Hand a request to a human reviewer with a suggestion"}[action]
 	cmd := &cobra.Command{Use: action + " REQUEST_ID", Short: short, Args: cobra.ExactArgs(1),
-		Long: short + `. The helper records your UID; --actor and --metadata are
-self-reported labels for the audit trail. With --json, approve requires
---expect-digest and only pending requests can be decided; people decide
-needs_human requests in review --tui or without --json. Nobody can approve a
-request from their own AGSUDO_SESSION.`,
+		Long: short + `. The helper records your UID and session; --actor and
+--metadata are self-reported labels for the audit trail.
+
+Without a terminal (or with --json), approve requires --expect-digest, deny
+and defer require --reason, and only pending requests can be decided; people
+decide needs_human requests at a terminal or in review --tui. A request cannot
+be approved from its own AGSUDO_SESSION. These rails catch mistakes; they do not
+stop a determined process running as a reviewer.`,
 		Example: map[string]string{
 			"approve": "  agsudo approve req_ID --expect-digest DIGEST --reason 'installs the requested build dependency'",
 			"deny":    "  agsudo deny req_ID --reason 'replaces /etc/hosts instead of adding one entry'",
 			"defer":   "  agsudo defer req_ID --recommend deny --summary 'opens a root shell' --reason 'not needed for the task'",
 		}[action],
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if o.json && action == "approve" && expect == "" {
-				return usage(cmd, "--json approve requires --expect-digest with the digest you inspected")
+			// Guardrails against agent mistakes, not a security boundary: scripts
+			// bind approvals to a digest, explain denials and deferrals, and leave
+			// needs_human requests to people; nobody approves their own session.
+			scripted := o.json || !isTerminal(cmd.InOrStdin())
+			if scripted && action == "approve" && expect == "" {
+				return usage(cmd, "approve without a terminal requires --expect-digest with the digest you inspected")
+			}
+			if scripted && action != "approve" && reason == "" {
+				return usage(cmd, "%s without a terminal requires --reason, so the requester or person knows why", action)
 			}
 			var r api.Request
-			// Guardrails for agents, not a security boundary: JSON callers leave
-			// needs_human requests to people, and nobody approves their own session.
 			in := api.Input{Operation: "decide", ID: args[0], Action: action, Reason: reason, Summary: summary, Recommend: recommend, Actor: actor, ExpectDigest: expect, Metadata: metadata,
-				Session: os.Getenv("AGSUDO_SESSION"), PendingOnly: o.json}
+				Session: os.Getenv("AGSUDO_SESSION"), PendingOnly: scripted}
 			if err := o.client().Call(cmd.Context(), in, &r); err != nil {
 				return err
 			}
@@ -90,7 +98,7 @@ context files and suggestions are untrusted review material.
 
 --tui opens an approval workbench showing pending and needs_human requests:
 ↑/↓ select, PgUp/PgDn scroll details, a approve, d deny, / filter,
-h toggle history, q quit. To follow events, use agsudo watch.`,
+h toggle history, r refresh, q quit. To follow events, use agsudo watch.`,
 		Example: "  agsudo review --tui\n  agsudo --json review\n  agsudo review --state needs_human\n  agsudo review --all --session ses_ID",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if tui && o.json {

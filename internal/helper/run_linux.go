@@ -46,7 +46,7 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 	}
 	select {
 	case sig := <-signals:
-		return interrupt(ctx, s, a, id, sig, ui)
+		return interrupt(ctx, s, a, r, sig, ui)
 	default:
 	}
 	// Cancellation and consumption compete in one transaction. After consumption
@@ -77,9 +77,9 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 		return finish(128+int(sig.(syscall.Signal)), "interrupted before start")
 	default:
 	}
-	// ELF programs run from the verified inode. Shebang scripts keep their path
-	// for $0 / interpreter resource lookup; their hash check is best effort,
-	// not protection against an adversary concurrently replacing script paths.
+	// ELF programs run from the hashed inode; shebang scripts keep their path
+	// for $0 and interpreter lookups. Neither stops someone who can write the
+	// file from changing it after hashing: such executables are arbitrary code.
 	cmd := exec.Command("/proc/self/fd/3")
 	var header [2]byte
 	if n, _ := f.ReadAt(header[:], 0); n == 2 && string(header[:]) == "#!" {
@@ -126,11 +126,14 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 		return finish(1, err.Error())
 	}
 	// Like sudo, signal only the command; an interactive shell passes hangups
-	// on to its own jobs. Keyboard signals already reached the shared job.
+	// on to its own jobs. Keyboard signals already reached a foreground job.
 	forward := func(sig syscall.Signal) {
 		if !hasTTY {
 			_ = syscall.Kill(-cmd.Process.Pid, sig)
-		} else if sig != syscall.SIGINT && sig != syscall.SIGQUIT {
+			return
+		}
+		pgrp, err := unix.IoctlGetInt(int(tty.Fd()), unix.TIOCGPGRP)
+		if (sig != syscall.SIGINT && sig != syscall.SIGQUIT) || err != nil || pgrp != syscall.Getpgrp() {
 			_ = cmd.Process.Signal(sig)
 		}
 	}

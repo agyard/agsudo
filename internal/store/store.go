@@ -120,6 +120,12 @@ func scan(ctx context.Context, c *sql.Conn, q string, args ...any) ([]api.Reques
 }
 
 // refresh performs lifecycle housekeeping on demand, without a timer service.
+// commandKey identifies what would run: the spec without its explanations.
+func commandKey(spec api.Spec) string {
+	spec.Reason, spec.Context = "", nil
+	return api.Digest(spec)
+}
+
 func (s *Store) refresh(ctx context.Context, c *sql.Conn, filter string, args ...any) ([]api.Request, error) {
 	rs, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE state IN ('pending','needs_human','approved','running')"+filter, args...)
 	for i := 0; err == nil && i < len(rs); i++ {
@@ -178,16 +184,27 @@ func (s *Store) Create(ctx context.Context, r api.Request) (api.Request, error) 
 		if err != nil {
 			return err
 		}
-		count := 0
+		// Running the same command again in the same session, whatever its
+		// reason or context, attaches to its unused request instead of adding
+		// one, and gets a recent denial again instead of asking anew.
+		count, key := 0, commandKey(r.Spec)
 		for _, old := range rs {
-			// Running the same command again in the same session (the digest
-			// covers both) attaches to its unused request instead of adding one.
-			if old.Unstarted() && old.Digest == r.Digest {
+			if old.Unstarted() && commandKey(old.Spec) == key {
 				r = old
 				return nil
 			}
 			if old.Unstarted() {
 				count++
+			}
+		}
+		denied, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE owner_uid=? AND session=? AND state='denied' ORDER BY rowid DESC LIMIT 20", r.OwnerUID, r.Spec.Session)
+		if err != nil {
+			return err
+		}
+		for _, old := range denied {
+			if s.Now().Before(old.ExpiresAt) && commandKey(old.Spec) == key {
+				r = old
+				return nil
 			}
 		}
 		if count >= 256 {
@@ -269,8 +286,7 @@ func (s *Store) Decide(ctx context.Context, id string, a Access, d api.Decision,
 	if !a.Reviewer && a.UID != 0 {
 		return api.Request{}, api.Err("forbidden", "this user is not an approver")
 	}
-	d.Actor.UID = a.UID
-	d.At = s.Now()
+	d.Actor.UID, d.At, d.Session = a.UID, s.Now(), check.Session
 	return s.change(ctx, id, a, d.Actor, func(r *api.Request) (string, error) {
 		// A repeat of the same final decision is safe and adds no duplicate event.
 		repeat := r.Decision != nil && r.Decision.Action == d.Action && r.Decision.Actor.UID == a.UID && (r.State == "approved" || r.State == "denied")

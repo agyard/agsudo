@@ -120,7 +120,7 @@ func resolve(name, cwd, path string) (string, error) {
 	}
 	switch {
 	case strings.ContainsRune(name, '='):
-		return "", api.Err("invalid_command", "environment assignments such as %q are not supported; the environment is sanitized", name)
+		return "", api.Err("invalid_command", "the environment is sanitized; instead of %q, use: sudo env NAME=VALUE COMMAND", name)
 	case strings.ContainsRune(name, '/'):
 		return "", api.Err("invalid_command", "%q is not an executable file", name)
 	}

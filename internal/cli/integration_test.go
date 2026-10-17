@@ -13,7 +13,7 @@ func TestIntegrationConfigRoundTrip(t *testing.T) {
 	for _, host := range []string{"codex", "claude"} {
 		t.Run(host, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
-			original := []byte(`{"unrelated":9007199254740993,"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"keep-me"}]}]}}`)
+			original := []byte(`{"unrelated":9007199254740993,"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"keep-me && true"}]}]}}`)
 			if err := os.WriteFile(path, original, 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -29,7 +29,7 @@ func TestIntegrationConfigRoundTrip(t *testing.T) {
 				if got := bytes.Count(b, []byte(integrationMarker(host))); got != len(integrationEvents(host)) {
 					t.Fatalf("duplicated or missing hooks: %s", b)
 				}
-				if !bytes.Contains(b, []byte("9007199254740993")) || !bytes.Contains(b, []byte("keep-me")) {
+				if !bytes.Contains(b, []byte("9007199254740993")) || !bytes.Contains(b, []byte("keep-me && true")) {
 					t.Fatalf("lost unrelated settings: %s", b)
 				}
 			}

@@ -15,7 +15,7 @@ With `--json` (anywhere before `--`), control commands print success to stdout:
 Errors go to stderr, with nonzero exit status:
 
 ```json
-{"schema_version":1,"error":{"code":"conflict","message":"cannot approve request in state canceled"}}
+{"schema_version":1,"error":{"code":"conflict","message":"cannot approve req_3f9c2a71d04b8e65: it is canceled"}}
 ```
 
 `request`, `show`/`status`, `approve`, `deny`, `defer` and `cancel` return a request in `data`. `review --json` returns `data.requests`. `doctor` returns mode and caller permissions. The Go structures in `internal/api/types.go` define the complete schema. A request contains the full argument vector, resolved executable and SHA-256, cwd, target identity/groups, exact clean environment, reason, snapshots, session, digest, states, timestamps and decisions. Help is always text.
@@ -46,11 +46,11 @@ stateDiagram-v2
     running --> unknown: monitor disappeared
 ```
 
-Approval never starts a command by itself. A waiting `sudo` or `agsudo exec` starts it; otherwise the requester runs `agsudo exec --request ID`, at most once. Ctrl-C (SIGINT or SIGQUIT) while waiting cancels the request. Any other end of a wait — SIGTERM, SIGHUP, SIGKILL — leaves the request as it is until it expires. Submitting a request whose digest equals one of the owner's unused (pending, needs_human or approved) requests returns that request instead of creating another; since the digest covers the session, running the same command again in the same session resumes it.
+Approval never starts a command by itself. A waiting `sudo` or `agsudo exec` starts it; otherwise the requester runs `agsudo exec --request ID`, at most once. Ctrl-C (SIGINT or SIGQUIT) while waiting cancels the request. Any other end of a wait — SIGTERM, SIGHUP, SIGKILL — leaves the request as it is until it expires. Submitting a command that matches one of the owner's unused (pending, needs_human or approved) requests — same spec and session, ignoring reason and context — returns that request instead of creating another, so running the same command again resumes it. A match denied within its TTL is returned as well, so the denial is reported instead of asking again.
 
 `running` starts with consuming the grant, before spawning the program. `command_pid` appears after successful spawn. Thus a crash during launch can become `unknown`, even if the program never started. Never retry such a grant automatically.
 
-Decisions with `--json` set `pending_only`, so `needs_human` requests are left to people, and `approve` with `--json` requires `--expect-digest`. Approving a request whose session equals the caller's `AGSUDO_SESSION` is `forbidden`. These are guardrails against agent mistakes, not authentication. Same-action approve/deny retries from the same UID are idempotent while that final decision is still current. Opposing decisions conflict. `defer` updates the suggestion while keeping the immutable command; its state becomes `needs_human`. Manual approval retains that suggestion for later comparison. Suggestions and metadata are attribution, not verified identities or safety ground truth.
+Decisions made without a terminal or with `--json` set `pending_only`, so `needs_human` requests are left to people; such callers must also pass `--expect-digest` to approve and `--reason` to deny or defer. Approving a request whose session equals the caller's `AGSUDO_SESSION` is `forbidden`, and decisions record that session. These are guardrails against agent mistakes, not authentication. Same-action approve/deny retries from the same UID are idempotent while that final decision is still current. Opposing decisions conflict. `defer` updates the suggestion while keeping the immutable command; its state becomes `needs_human`. Manual approval retains that suggestion for later comparison. Suggestions and metadata are attribution, not verified identities or safety ground truth.
 
 No always-on process is necessary: lifecycle checks run during queries, decisions and execution, so expiry and lost executions produce events without a daemon. An execution monitor is identified by kernel PID, process start time and boot ID.
 
@@ -68,7 +68,7 @@ Sequences are global and monotonically increasing; a filtered user's stream may 
 
 ## Exit status and errors
 
-Control commands: `0` success, `1` operation failure, `2` invalid CLI usage, `130` interrupted watch/TUI. JSON errors contain a stable code such as `usage`, `forbidden`, `not_found`, `conflict`, `invalid_input`, `invalid_user`, `invalid_command`, `command_not_found`, `queue_full`, `configuration`, `helper_unavailable` or `protocol_version`.
+Control commands: `0` success, `1` operation failure, `2` invalid CLI usage, `130` interrupted (for example a watch, the TUI, or a submission). JSON errors contain a stable code such as `usage`, `forbidden`, `not_found`, `conflict`, `invalid_input`, `invalid_user`, `invalid_command`, `command_not_found`, `queue_full`, `configuration`, `helper_unavailable` or `protocol_version`.
 
 Execution, like sudo: the command's exit status, or `128 + N` when it is killed by signal N. If the command does not start — denied, expired, canceled, already used, not permitted, or a setup failure — the exit status is `1` and stderr says why. An interrupted wait exits with `128 + N` for signal N. `status` and audit events distinguish these cases from a command that itself exits 1.
 

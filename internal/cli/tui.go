@@ -17,7 +17,6 @@ import (
 	"github.com/agyard/agsudo/internal/api"
 	"github.com/agyard/agsudo/internal/client"
 	"github.com/charmbracelet/x/ansi"
-	"golang.org/x/term"
 )
 
 type reviewItem struct{ request api.Request }
@@ -28,7 +27,7 @@ func (i reviewItem) Description() string {
 	if reason == "" {
 		reason = "no reason given"
 	}
-	return api.Safe(i.request.Spec.Target.Name+" · "+reason+" · "+i.request.ID, false)
+	return prose(i.request.Spec.Target.Name + " · " + reason + " · " + i.request.ID)
 }
 
 // substringFilter keeps queue order; fuzzy matching surprised reviewers.
@@ -77,9 +76,7 @@ type reviewModel struct {
 }
 
 func runTUI(ctx context.Context, c client.Client, states []string, session string, in io.Reader, out io.Writer) error {
-	i, iOK := in.(*os.File)
-	o, oOK := out.(*os.File)
-	if !iOK || !oOK || !term.IsTerminal(int(i.Fd())) || !term.IsTerminal(int(o.Fd())) {
+	if !isTerminal(in) || !isTerminal(out) {
 		return api.Err("terminal_required", "review --tui requires an interactive terminal; agents use agsudo --json review")
 	}
 	uiCtx, cancel := context.WithCancel(ctx)
@@ -101,6 +98,7 @@ func newReviewModel(ctx context.Context, b reviewBackend, states []string, sessi
 	l.Filter = substringFilter
 	l.Styles.TitleBar = l.Styles.TitleBar.PaddingBottom(0)
 	l.Styles.StatusBar = l.Styles.StatusBar.PaddingBottom(0)
+	l.SetShowPagination(false) // The status bar already counts requests.
 	v := viewport.New(viewport.WithWidth(60), viewport.WithHeight(18))
 	input := textinput.New()
 	input.Prompt = "Reason > "
@@ -154,8 +152,8 @@ func (m *reviewModel) syncDetails() {
 		r = m.confirm
 	}
 	if r == nil {
+		// Keep selectedID: a filtered refresh briefly shows no items.
 		m.details.SetContent("No request selected. New requests appear automatically.\n\n/ filter · h include history · r refresh")
-		m.selectedID = ""
 		return
 	}
 	if m.selectedID != r.ID {
@@ -188,23 +186,13 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.setError(msg.err)
 			return m, nil
 		}
-		oldID := ""
-		if r := m.selected(); r != nil {
-			oldID = r.ID
-		}
-		// Stay on the same request, or at the same position after a decision.
 		items := make([]list.Item, len(msg.requests))
-		selected := max(min(m.queue.Index(), len(items)-1), 0)
 		for i, r := range msg.requests {
 			items[i] = reviewItem{r}
-			if r.ID == oldID {
-				selected = i
-			}
 		}
+		row := m.queue.Index()
 		cmd := m.queue.SetItems(items)
-		if !m.queue.IsFiltered() {
-			m.queue.Select(selected)
-		}
+		m.selectID(m.selectedID, row)
 		return m, cmd
 	case decided:
 		m.busy = false
@@ -223,6 +211,7 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.busy {
 			return m, nil
 		}
+		m.status, m.errorStatus = "", false
 		// ↑/↓ always move in the queue; PgUp/PgDn always scroll the details.
 		if key == "pgup" || key == "pgdown" {
 			var cmd tea.Cmd
@@ -245,7 +234,7 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.reason.Blur()
 				return m, func() tea.Msg {
 					var out api.Request
-					err := b.Call(ctx, api.Input{Operation: "decide", ID: r.ID, Action: action, Actor: "human:tui", Reason: reason, ExpectDigest: r.Digest}, &out)
+					err := b.Call(ctx, api.Input{Operation: "decide", ID: r.ID, Action: action, Actor: "human:tui", Reason: reason, ExpectDigest: r.Digest, Session: os.Getenv("AGSUDO_SESSION")}, &out)
 					return decided{out, err}
 				}
 			}
@@ -254,9 +243,7 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if m.queue.SettingFilter() {
-			var cmd tea.Cmd
-			m.queue, cmd = m.queue.Update(msg)
-			return m, cmd
+			return m, m.updateQueue(msg)
 		}
 		switch key {
 		case "q":
@@ -276,27 +263,42 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if !r.Waiting() {
-				m.setError(fmt.Errorf("request is %s; only pending requests can be reviewed", r.State))
+				m.setError(fmt.Errorf("%s is %s; only pending and needs_human requests can be decided", r.ID, r.State))
 				return m, nil
 			}
+			m.details.GotoTop() // Show the whole command while confirming.
 			m.confirm = r
 			m.action = map[string]string{"a": "approve", "d": "deny"}[key]
 			m.reason.SetValue("")
 			return m, m.reason.Focus()
 		}
 	}
-	// Clearing a filter keeps the selected request, not its row.
+	return m, m.updateQueue(message)
+}
+
+// updateQueue passes a message to the list. Refreshes, filter results and
+// clearing a filter keep the selected request; other keys move the selection.
+func (m *reviewModel) updateQueue(msg tea.Msg) tea.Cmd {
+	_, key := msg.(tea.KeyPressMsg)
 	filtered, id := m.queue.FilterState() != list.Unfiltered, m.selectedID
 	var cmd tea.Cmd
-	m.queue, cmd = m.queue.Update(message)
-	if filtered && m.queue.FilterState() == list.Unfiltered {
-		for i, item := range m.queue.Items() {
-			if item.(reviewItem).request.ID == id {
-				m.queue.Select(i)
-			}
+	m.queue, cmd = m.queue.Update(msg)
+	if !key || filtered && m.queue.FilterState() == list.Unfiltered {
+		m.selectID(id, m.queue.Index())
+	}
+	return cmd
+}
+
+// selectID keeps the cursor on request id when it is visible; otherwise it
+// stays on the same row, so the next request moves up after a decision.
+func (m *reviewModel) selectID(id string, row int) {
+	visible := m.queue.VisibleItems()
+	for i, item := range visible {
+		if item.(reviewItem).request.ID == id {
+			row = i
 		}
 	}
-	return m, cmd
+	m.queue.Select(max(min(row, len(visible)-1), 0))
 }
 func (m *reviewModel) View() tea.View {
 	if m.width < 50 || m.height < 18 {

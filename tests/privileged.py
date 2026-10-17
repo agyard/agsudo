@@ -65,7 +65,7 @@ sed -i 's/"allowed_uids": \[1000\]/"allowed_uids": [1000, 1001]/' /etc/agsudo/co
 
     def test_different_target_drops_groups_and_uid(self):
         req = self.request("sh", "-c", 'id -u; id -g; id -G; printf "%s" "$HOME"', options=("-u", "other"))
-        self.call("approve", req["id"])
+        self.call("approve", req["id"], "--expect-digest", req["digest"])
         p = self.call("exec", "--request", req["id"])
         self.assertEqual(p.stdout, "1001\n1001\n1001\n/home/other")
 
@@ -81,7 +81,7 @@ sed -i 's/"allowed_uids": \[1000\]/"allowed_uids": [1000, 1001]/' /etc/agsudo/co
 
     def test_reviewer_can_approve_but_not_run_other_users_request(self):
         req = self.request("id", uid=1001)
-        self.call("approve", req["id"])
+        self.call("approve", req["id"], "--expect-digest", req["digest"])
         p = self.call("exec", "--request", req["id"], check=False)
         self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: only the requester can execute {req['id']}\n"))
         p = self.call("exec", "--request", req["id"], uid=1001)

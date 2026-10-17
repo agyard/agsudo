@@ -105,7 +105,10 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, "agsudo-helper is an internal program; use agsudo --help")
 		return 2
 	}
-	ui := executionUI{sudo: args[0] == "run-sudo"}
+	ui := executionUI{"agsudo", "agsudo help --requester"}
+	if args[0] == "run-sudo" {
+		ui = executionUI{"sudo", "sudo --help"}
+	}
 	fail := func(err error) int {
 		if run {
 			ui.message("%v", err)
