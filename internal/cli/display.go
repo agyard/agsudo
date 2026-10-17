@@ -108,6 +108,16 @@ func approvalTarget(r api.Request) string {
 	}
 	return command(r)
 }
+
+// elide fits s into width cells by cutting its middle, so both the start and
+// the end of a command stay visible where a decision is confirmed.
+func elide(s string, width int) string {
+	if ansi.StringWidth(s) <= width || width < 9 {
+		return ansi.Truncate(s, width, "…")
+	}
+	head := (width - 1) / 2
+	return ansi.Truncate(s, head, "") + "…" + ansi.TruncateLeft(s, ansi.StringWidth(s)-(width-1-head), "")
+}
 func when(t time.Time) string { return t.Local().Format(time.DateTime + " MST") }
 func requestText(r api.Request) string {
 	var b strings.Builder

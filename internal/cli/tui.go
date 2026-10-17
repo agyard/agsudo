@@ -331,15 +331,22 @@ func (m *reviewModel) View() tea.View {
 		if m.action == "approve" {
 			title = "APPROVE " + approvalTarget(*m.confirm)
 		}
-		foot = accent.Render(ansi.Truncate(title, m.width-4, "…")) + "\n" + m.reason.View()
+		foot = accent.Render(elide(title, m.width-4)) + "\n" + m.reason.View()
 	}
 	if m.busy {
 		foot = "Saving decision…"
 	}
 	status := api.Safe(m.status, false)
-	// The details may hide the end of a long command; say so before anything else.
+	// Say when details continue below; only errors come first.
 	if more := m.details.TotalLineCount() - m.details.YOffset() - m.details.Height(); more > 0 {
-		status = strings.TrimSuffix(fmt.Sprintf("↓ %d more lines of details (PgDn) · %s", more, status), " · ")
+		hint := fmt.Sprintf("↓ %d more lines of details (PgDn)", more)
+		if status == "" {
+			status = hint
+		} else if m.errorStatus {
+			status += " · " + hint
+		} else {
+			status = hint + " · " + status
+		}
 	}
 	style := muted
 	if m.errorStatus {

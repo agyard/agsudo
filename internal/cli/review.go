@@ -10,7 +10,6 @@ import (
 
 	"github.com/agyard/agsudo/internal/api"
 	"github.com/agyard/agsudo/internal/client"
-	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 )
 
@@ -95,7 +94,7 @@ func confirmApproval(cmd *cobra.Command, id string) (string, error) {
 	}
 	prompt := "Approve " + approvalTarget(r)
 	if width := terminalWidth(cmd.OutOrStdout()); width > 0 {
-		prompt = ansi.Truncate(prompt, width-len(r.ID)-12, "…")
+		prompt = elide(prompt, width-len(r.ID)-12)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%s\n\n%s (%s)? [y/N] ", text, prompt, r.ID)
 	answer, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')

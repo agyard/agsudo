@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/agyard/agsudo/internal/api"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestHelpAndUsageDoNotOpenHelper(t *testing.T) {
@@ -76,6 +77,12 @@ func TestWrapNeverStartsAFieldLine(t *testing.T) {
 	}
 	if !strings.Contains(got, "  │ --no-preserve-root\n") || strings.Contains(got, "--no-\n") {
 		t.Fatalf("broke an argument or lost the gutter: %q", got)
+	}
+}
+func TestElideKeepsTheEndOfACommand(t *testing.T) {
+	got := elide("bash -c 'printf "+strings.Repeat("y", 500)+"; rm -rf /srv'", 40)
+	if ansi.StringWidth(got) != 40 || !strings.HasPrefix(got, "bash -c") || !strings.HasSuffix(got, "rm -rf /srv'") {
+		t.Fatalf("lost the start or end: %q", got)
 	}
 }
 func TestJSONErrorsWhereverTheFlagIs(t *testing.T) {
