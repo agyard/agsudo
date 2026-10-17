@@ -35,8 +35,8 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 		ui.message("cannot establish process identity")
 		return 1
 	}
-	r, code, ok := waitForApproval(ctx, s, a, id, signals, ui)
-	if !ok {
+	r, code := waitForApproval(ctx, s, a, id, signals, ui)
+	if code != 0 {
 		return code
 	}
 	// Hash before claiming, so a signal meanwhile still leaves the grant unused.

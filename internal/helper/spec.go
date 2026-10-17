@@ -189,7 +189,7 @@ func prepare(in api.Input, c Config, uid, gid int) (api.Spec, error) {
 	total = 0
 	for i, f := range s.Context {
 		total += len(f.Content)
-		if !filepath.IsAbs(f.Path) || len(f.Content) > 64<<10 || !utf8.ValidString(f.Content) {
+		if !filepath.IsAbs(f.Path) || len(f.Content) > api.MaxContextFile || !utf8.ValidString(f.Content) {
 			return s, api.Err("invalid_input", "context %s must be UTF-8 text of at most 64 KiB", f.Path)
 		}
 		s.Context[i].SHA256, s.Context[i].Source = api.Hash([]byte(f.Content)), "caller_supplied"

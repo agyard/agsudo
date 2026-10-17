@@ -27,7 +27,7 @@ func command(r api.Request) string {
 		switch {
 		case plainArgument.MatchString(s):
 			words[i] = s
-		case utf8.ValidString(s) && strings.IndexFunc(s, func(r rune) bool { return !strconv.IsPrint(r) }) < 0:
+		case utf8.ValidString(s) && !strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) }):
 			words[i] = shellQuote(s)
 		default:
 			q := strconv.Quote(s)
@@ -60,22 +60,25 @@ func wrap(text string, width int) string {
 	for _, line := range strings.Split(text, "\n") {
 		body := strings.TrimLeft(line, " │")
 		prefix, current := line[:len(line)-len(body)], ""
-		next := prefix + "↪ "
+		next, used := prefix+"↪ ", ansi.StringWidth(prefix)
 		for i, word := range strings.Split(body, " ") {
+			w := ansi.StringWidth(word)
 			switch {
 			case i == 0:
-				current = word
-			case ansi.StringWidth(prefix+current+" "+word) > width:
+				current, used = word, used+w
+			case used+1+w > width:
 				lines, prefix, current = append(lines, prefix+current), next, word
+				used = ansi.StringWidth(next) + w
 			default:
-				current += " " + word
+				current, used = current+" "+word, used+1+w
 			}
-			for ansi.StringWidth(prefix+current) > width {
+			for used > width {
 				head := ansi.Truncate(current, width-ansi.StringWidth(prefix), "")
 				if head == "" {
 					break
 				}
 				lines, prefix, current = append(lines, prefix+head), next, current[len(head):]
+				used = ansi.StringWidth(next + current)
 			}
 		}
 		lines = append(lines, prefix+current)
@@ -90,19 +93,19 @@ func isTerminal(f any) bool {
 
 // terminalWidth is the width of out if it is a terminal, otherwise 0.
 func terminalWidth(out io.Writer) int {
-	if isTerminal(out) {
-		if cols, _, err := term.GetSize(int(out.(*os.File).Fd())); err == nil {
+	if file, ok := out.(*os.File); ok {
+		if cols, _, err := term.GetSize(int(file.Fd())); err == nil {
 			return cols
 		}
 	}
 	return 0
 }
-func when(t time.Time) string { return t.Local().Format("2006-01-02 15:04:05 MST") }
+func when(t time.Time) string { return t.Local().Format(time.DateTime + " MST") }
 func requestText(r api.Request) string {
 	var b strings.Builder
 	field := func(label, value string) {
 		if value != "" {
-			fmt.Fprintf(&b, "%s: %s\n", label, value)
+			fmt.Fprintf(&b, "%s: %s\n", label, api.Safe(value, false))
 		}
 	}
 	fmt.Fprintf(&b, "%s  %s\n", r.ID, r.State)
@@ -111,10 +114,10 @@ func requestText(r api.Request) string {
 	if r.Spec.Scope == "shell_session" {
 		field("Scope", "shell; everything it runs, typed or piped in, is authorized without review")
 	}
-	field("Executable", api.Safe(r.Spec.Executable, false))
-	field("Directory", api.Safe(r.Spec.Cwd, false))
-	field("Target", fmt.Sprintf("%s (UID %d)", api.Safe(r.Spec.Target.Name, false), r.Spec.Target.UID))
-	field("Session", api.Safe(r.Spec.Session, false))
+	field("Executable", r.Spec.Executable)
+	field("Directory", r.Spec.Cwd)
+	field("Target", fmt.Sprintf("%s (UID %d)", r.Spec.Target.Name, r.Spec.Target.UID))
+	field("Session", r.Spec.Session)
 	field("Created", when(r.CreatedAt))
 	if left := time.Until(r.ExpiresAt).Round(time.Second); r.Unstarted() && left > 0 {
 		field("Expires", when(r.ExpiresAt)+" (in "+left.String()+")")
@@ -126,7 +129,7 @@ func requestText(r api.Request) string {
 	for _, d := range []*api.Decision{r.Suggestion, r.Decision} {
 		if d != nil {
 			fmt.Fprintf(&b, "\n%s by UID %d at %s %s\n", d.Action, d.Actor.UID, when(d.At), prose(d.Actor.Label))
-			field("From session", api.Safe(d.Session, false))
+			field("From session", d.Session)
 			field("Summary", prose(d.Summary))
 			field("Reason", prose(d.Reason))
 			if d.Action == "defer" {
@@ -137,7 +140,11 @@ func requestText(r api.Request) string {
 	if r.ExitCode != nil {
 		field("Exit status", strconv.Itoa(*r.ExitCode))
 	}
-	field(map[bool]string{true: "Canceled", false: "Failure"}[r.State == "canceled"], prose(r.Failure))
+	if r.State == "canceled" {
+		field("Canceled", prose(r.Failure))
+	} else {
+		field("Failure", prose(r.Failure))
+	}
 	b.WriteString("\nEnvironment (sanitized):\n")
 	for _, value := range r.Spec.Environment {
 		fmt.Fprintf(&b, "  %s\n", api.Safe(value, false))
@@ -155,12 +162,13 @@ func printRequests(out io.Writer, requests []api.Request) error {
 	}
 	rows := [][]string{{"REQUEST", "STATE", "TARGET", "COMMAND", "REASON"}}
 	for _, r := range requests {
-		rows = append(rows, []string{r.ID, r.State, api.Safe(r.Spec.Target.Name, false), commandLabel(r), prose(r.Spec.Reason)})
+		rows = append(rows, []string{r.ID, r.State, r.Spec.Target.Name, commandLabel(r), prose(r.Spec.Reason)})
 	}
 	var w [5]int
 	for _, row := range rows {
 		for i, cell := range row {
-			w[i] = max(w[i], ansi.StringWidth(cell))
+			row[i] = api.Safe(cell, false)
+			w[i] = max(w[i], ansi.StringWidth(row[i]))
 		}
 	}
 	width := terminalWidth(out)

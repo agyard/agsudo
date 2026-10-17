@@ -90,7 +90,7 @@ func (c Client) ListAll(ctx context.Context, states []string, session string) ([
 			return nil, err
 		}
 		all = append(all, page.Requests...)
-		if page.NextCursor == cursor {
+		if len(page.Requests) < 200 {
 			break
 		}
 		cursor = page.NextCursor

@@ -89,14 +89,13 @@ func runIntegrationHook(host string, input io.Reader, output io.Writer) error {
 	if err != nil {
 		return codexHookResult(output, "deny", "AG-sudo could not prepare sudo: "+err.Error(), nil)
 	}
-	preamble := integrationEnvironment(dir, host, event.Session)
 	// Preserve every other tool argument. The original shell parses the command
-	// after this preamble; scripts, pipelines and heredocs keep their semantics.
+	// after the environment line; scripts, pipelines and heredocs keep working.
 	updated := make(map[string]json.RawMessage, len(event.Input))
 	for key, value := range event.Input {
 		updated[key] = value
 	}
-	updated["command"], err = json.Marshal(preamble + command)
+	updated["command"], err = json.Marshal(integrationEnvironment(dir, host, event.Session) + command)
 	if err != nil {
 		return err
 	}

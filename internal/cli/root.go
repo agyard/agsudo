@@ -20,7 +20,6 @@ var Version = "dev"
 
 type options struct{ json bool }
 
-func (o *options) client() client.Client { return client.New() }
 func (o *options) print(cmd *cobra.Command, data any, text string) error {
 	if o.json {
 		b, err := json.Marshal(data)
@@ -32,12 +31,12 @@ func (o *options) print(cmd *cobra.Command, data any, text string) error {
 	_, err := fmt.Fprintln(cmd.OutOrStdout(), text)
 	return err
 }
-func usage(cmd *cobra.Command, format string, args ...any) error {
-	return api.Err("usage", format+"\nRun '%s --help' for usage and examples.", append(args, cmd.CommandPath())...)
-}
+
+// usage errors exit 2; Execute adds a pointer to the command's help.
+func usage(format string, args ...any) error { return api.Err("usage", format, args...) }
 func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
 	if filepath.Base(os.Args[0]) == "sudo" {
-		return sudo(ctx, args, in, out, errOut)
+		return sudo(ctx, args, out, errOut)
 	}
 	o := &options{}
 	root := newRoot(o, in, out, errOut)
@@ -45,13 +44,10 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	started := false
 	root.PersistentPreRun = func(*cobra.Command, []string) { started = true }
 	cmd, err := root.ExecuteContextC(ctx)
+	var e *api.Error
 	if err != nil && !started {
-		var e *api.Error
 		if !errors.As(err, &e) {
-			if cmd == nil {
-				cmd = root
-			}
-			err = usage(cmd, "%v", err)
+			err = usage("%v", err) // Flag and argument errors from cobra.
 		}
 		// Parsing may stop before reaching --json; errors still honor it.
 		end := slices.Index(args, "--")
@@ -59,6 +55,9 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 			end = len(args)
 		}
 		o.json = o.json || slices.Contains(args[:end], "--json")
+	}
+	if errors.As(err, &e) && e.Code == "usage" && cmd != nil {
+		e.Message += "\nRun '" + cmd.CommandPath() + " --help' for usage and examples."
 	}
 	return report(err, o.json, errOut, "agsudo")
 }
@@ -94,7 +93,6 @@ Agent guides: "agsudo help --requester" and "agsudo help --reviewer".`,
 	r.SetOut(out)
 	r.SetErr(errOut)
 	r.PersistentFlags().BoolVar(&o.json, "json", false, "Output versioned JSON (control commands only)")
-	r.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error { return usage(cmd, "%v", err) })
 	r.SetCompletionCommandGroupID("tools")
 	r.AddGroup(&cobra.Group{ID: "run", Title: "Request and execute:"}, &cobra.Group{ID: "review", Title: "Review and decide:"}, &cobra.Group{ID: "audit", Title: "Inspect and export:"}, &cobra.Group{ID: "tools", Title: "CLI tools:"})
 	add := func(group string, cmds ...*cobra.Command) {
@@ -109,7 +107,7 @@ Agent guides: "agsudo help --requester" and "agsudo help --reviewer".`,
 	add("audit", newShow(o), newWatch(o), newAudit(o))
 	add("tools", &cobra.Command{Use: "doctor", Short: "Check helper installation and permissions", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		var data map[string]any
-		if err := o.client().Call(cmd.Context(), api.Input{Operation: "info"}, &data); err != nil {
+		if err := client.New().Call(cmd.Context(), api.Input{Operation: "info"}, &data); err != nil {
 			return err
 		}
 		return o.print(cmd, data, fmt.Sprintf("Mode: %v\nUID: %v\nCan submit: %v\nCan review: %v", data["mode"], data["caller_uid"], data["can_submit"], data["can_review"]))
@@ -120,10 +118,10 @@ Agent guides: "agsudo help --requester" and "agsudo help --reviewer".`,
 	var requester, reviewer bool
 	helpCmd := &cobra.Command{Use: "help [COMMAND...]", Short: "Explain a command or an agent workflow", GroupID: "tools", RunE: func(cmd *cobra.Command, args []string) error {
 		if requester && reviewer {
-			return usage(cmd, "choose either --requester or --reviewer")
+			return usage("choose either --requester or --reviewer")
 		}
 		if (requester || reviewer) && len(args) > 0 {
-			return usage(cmd, "workflow help cannot be combined with a command")
+			return usage("workflow help cannot be combined with a command")
 		}
 		if requester || reviewer {
 			guide := requesterHelp
@@ -135,13 +133,13 @@ Agent guides: "agsudo help --requester" and "agsudo help --reviewer".`,
 		}
 		target, rest, err := r.Find(args)
 		if err != nil {
-			return usage(cmd, "%v", err)
+			return usage("%v", err)
 		}
 		if len(rest) > 0 {
 			if len(args) == 1 && (args[0] == "requester" || args[0] == "reviewer") {
-				return usage(cmd, "use 'agsudo help --%s'", args[0])
+				return usage("use 'agsudo help --%s'", args[0])
 			}
-			return usage(cmd, "unknown help topic %s", strings.Join(rest, " "))
+			return usage("unknown help topic %s", strings.Join(rest, " "))
 		}
 		target.InitDefaultHelpFlag()
 		return target.Help()

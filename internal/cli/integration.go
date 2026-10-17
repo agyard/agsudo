@@ -37,13 +37,21 @@ func newIntegrationCommand(o *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				message := map[bool]string{true: "Installed", false: "Already installed"}[changed] + " in " + path +
-					"\nRestart the host to load the hooks, then check routing with: sudo --version"
-				if args[0] == "codex" {
-					message += "\nTrust the hook in Codex /hooks. It routes sudo only in Full Access mode."
-				}
-				if action == "uninstall" {
-					message = map[bool]string{true: "Uninstalled from ", false: "Not installed in "}[changed] + path
+				var message string
+				switch {
+				case action == "uninstall" && changed:
+					message = "Uninstalled from " + path
+				case action == "uninstall":
+					message = "Not installed in " + path
+				default:
+					message = "Installed in "
+					if !changed {
+						message = "Already installed in "
+					}
+					message += path + "\nRestart the host to load the hooks, then check routing with: sudo --version"
+					if args[0] == "codex" {
+						message += "\nTrust the hook in Codex /hooks. It routes sudo only in Full Access mode."
+					}
 				}
 				return o.print(cmd, map[string]any{"host": args[0], "path": path, "action": action, "changed": changed}, message)
 			}}

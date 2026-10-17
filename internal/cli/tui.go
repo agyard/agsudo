@@ -33,8 +33,9 @@ func (i reviewItem) Description() string {
 // substringFilter keeps queue order; fuzzy matching surprised reviewers.
 func substringFilter(term string, targets []string) []list.Rank {
 	var ranks []list.Rank
+	term = strings.ToLower(term)
 	for i, target := range targets {
-		if strings.Contains(strings.ToLower(target), strings.ToLower(term)) {
+		if strings.Contains(strings.ToLower(target), term) {
 			ranks = append(ranks, list.Rank{Index: i})
 		}
 	}

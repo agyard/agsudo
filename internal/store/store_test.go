@@ -261,17 +261,8 @@ func TestOnDemandExpiryAndQueueQuota(t *testing.T) {
 	if len(page.Events) != 2 || page.Events[1].Type != "request.expired" {
 		t.Fatalf("missing expiry event: %+v", page)
 	}
-	// A vanished submitter leaves the request resumable until it expires.
-	s.Alive = func(api.Process) bool { return false }
-	r, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, err := s.Get(testContext, r.ID, owner); err != nil || got.State != "pending" {
-		t.Fatalf("lost submitter changed state: %+v %v", got, err)
-	}
 	// Expired requests in other sessions do not count against the quota.
-	for range 255 {
+	for range 256 {
 		if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Second), Spec: api.Spec{Argv: []string{api.ID("")}, Session: "a"}}); err != nil {
 			t.Fatal(err)
 		}

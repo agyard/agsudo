@@ -39,46 +39,38 @@ func interrupt(ctx context.Context, s *store.Store, a store.Access, r api.Reques
 	return 128 + int(sig.(syscall.Signal))
 }
 
-// waitForApproval returns the approved request. Otherwise it reports why the
-// command did not start and returns the exit status.
-func waitForApproval(ctx context.Context, s *store.Store, a store.Access, id string, signals <-chan os.Signal, ui executionUI) (api.Request, int, bool) {
+// waitForApproval returns the approved request with status 0. Otherwise it
+// reports why the command did not start and returns the exit status.
+func waitForApproval(ctx context.Context, s *store.Store, a store.Access, id string, signals <-chan os.Signal, ui executionUI) (api.Request, int) {
 	notice := time.After(approvalNoticeDelay)
 	tick := time.NewTicker(150 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		r, err := s.Get(ctx, id, a)
-		if err != nil {
-			ui.message("%v", err)
-			return r, 1, false
+		problem := ""
+		switch {
+		case err != nil:
+			problem = err.Error()
+		case a.UID != r.OwnerUID && a.UID != 0:
+			problem = "only the requester can execute " + id
+		case r.State == "approved":
+			return r, 0
+		case r.State == "denied" && r.Decision != nil && r.Decision.Reason != "":
+			problem = id + " was denied: " + r.Decision.Reason
+		case r.State == "denied", r.State == "expired", r.State == "canceled":
+			problem = id + " is " + r.State + "; command was not started"
+		case r.State == "running":
+			problem = id + " is already running in another process"
+		case !r.Waiting():
+			problem = id + " has already run (" + r.State + "); run the command again to submit a new request"
 		}
-		if a.UID != r.OwnerUID && a.UID != 0 {
-			ui.message("only the requester can execute %s", id)
-			return r, 1, false
-		}
-		switch r.State {
-		case "approved":
-			return r, 0, true
-		case "pending", "needs_human":
-		case "denied":
-			reason := "; command was not started"
-			if r.Decision != nil && r.Decision.Reason != "" {
-				reason = ": " + r.Decision.Reason
-			}
-			ui.message("%s was denied%s", id, reason)
-			return r, 1, false
-		case "expired", "canceled":
-			ui.message("%s is %s; command was not started", id, r.State)
-			return r, 1, false
-		case "running":
-			ui.message("%s is already running in another process", id)
-			return r, 1, false
-		default:
-			ui.message("%s has already run (%s); run the command again to submit a new request", id, r.State)
-			return r, 1, false
+		if problem != "" {
+			ui.message("%s", problem)
+			return r, 1
 		}
 		select {
 		case sig := <-signals:
-			return r, interrupt(ctx, s, a, r, sig, ui), false
+			return r, interrupt(ctx, s, a, r, sig, ui)
 		case <-notice:
 			ui.message("waiting for approval of %s; see '%s'", id, ui.help)
 		case <-tick.C:

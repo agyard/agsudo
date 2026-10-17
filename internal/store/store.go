@@ -119,13 +119,13 @@ func scan(ctx context.Context, c *sql.Conn, q string, args ...any) ([]api.Reques
 	return rs, last, rows.Err()
 }
 
-// refresh performs lifecycle housekeeping on demand, without a timer service.
 // commandKey identifies what would run: the spec without its explanations.
 func commandKey(spec api.Spec) string {
 	spec.Reason, spec.Context = "", nil
 	return api.Digest(spec)
 }
 
+// refresh performs lifecycle housekeeping on demand, without a timer service.
 func (s *Store) refresh(ctx context.Context, c *sql.Conn, filter string, args ...any) ([]api.Request, error) {
 	rs, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE state IN ('pending','needs_human','approved','running')"+filter, args...)
 	for i := 0; err == nil && i < len(rs); i++ {
@@ -184,27 +184,22 @@ func (s *Store) Create(ctx context.Context, r api.Request) (api.Request, error) 
 		if err != nil {
 			return err
 		}
+		denied, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE owner_uid=? AND session=? AND state='denied' ORDER BY rowid DESC LIMIT 20", r.OwnerUID, r.Spec.Session)
+		if err != nil {
+			return err
+		}
 		// Running the same command again in the same session, whatever its
 		// reason or context, attaches to its unused request instead of adding
 		// one, and gets a recent denial again instead of asking anew.
 		count, key := 0, commandKey(r.Spec)
-		for _, old := range rs {
-			if old.Unstarted() && commandKey(old.Spec) == key {
+		for _, old := range append(rs, denied...) {
+			reusable := old.Unstarted() || old.State == "denied" && s.Now().Before(old.ExpiresAt)
+			if reusable && old.Spec.Session == r.Spec.Session && commandKey(old.Spec) == key {
 				r = old
 				return nil
 			}
 			if old.Unstarted() {
 				count++
-			}
-		}
-		denied, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE owner_uid=? AND session=? AND state='denied' ORDER BY rowid DESC LIMIT 20", r.OwnerUID, r.Spec.Session)
-		if err != nil {
-			return err
-		}
-		for _, old := range denied {
-			if s.Now().Before(old.ExpiresAt) && commandKey(old.Spec) == key {
-				r = old
-				return nil
 			}
 		}
 		if count >= 256 {

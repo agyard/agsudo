@@ -16,6 +16,7 @@ import (
 
 const Version = 1
 const MaxMessage = 1024 * 1024
+const MaxContextFile = 64 << 10
 
 type Error struct {
 	Code    string `json:"code"`

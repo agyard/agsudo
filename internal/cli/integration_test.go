@@ -116,12 +116,15 @@ func TestUninstallPreservesSiblingHandlers(t *testing.T) {
 
 func TestHookOnlyRewritesFullAccessBash(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	for _, tc := range []struct{ event, tool, mode, decision string }{
-		{"PostToolUse", "Bash", "bypassPermissions", ""},
-		{"PreToolUse", "Write", "bypassPermissions", ""},
-		{"PreToolUse", "Bash", "plan", ""},
-		{"PreToolUse", "Bash", "", ""},
-		{"PreToolUse", "Bash", "bypassPermissions", "allow"},
+	for _, tc := range []struct {
+		event, tool, mode string
+		rewrite           bool
+	}{
+		{"PostToolUse", "Bash", "bypassPermissions", false},
+		{"PreToolUse", "Write", "bypassPermissions", false},
+		{"PreToolUse", "Bash", "plan", false},
+		{"PreToolUse", "Bash", "", false},
+		{"PreToolUse", "Bash", "bypassPermissions", true},
 	} {
 		input, err := json.Marshal(map[string]any{"hook_event_name": tc.event, "tool_name": tc.tool, "permission_mode": tc.mode, "tool_input": map[string]any{"command": "sudo id"}})
 		if err != nil {
@@ -131,7 +134,7 @@ func TestHookOnlyRewritesFullAccessBash(t *testing.T) {
 		if err := runIntegrationHook("codex", bytes.NewReader(input), &out); err != nil {
 			t.Fatal(err)
 		}
-		if tc.decision == "" {
+		if !tc.rewrite {
 			if out.Len() != 0 {
 				t.Fatalf("changed unrelated event: %s", out.String())
 			}
@@ -148,7 +151,7 @@ func TestHookOnlyRewritesFullAccessBash(t *testing.T) {
 		if err := json.Unmarshal(out.Bytes(), &response); err != nil {
 			t.Fatal(err)
 		}
-		if response.Output.Decision != tc.decision || strings.Count(response.Output.Input.Command, "\n") != 1 {
+		if response.Output.Decision != "allow" || strings.Count(response.Output.Input.Command, "\n") != 1 {
 			t.Fatalf("wrong rewrite: %s", out.String())
 		}
 		// A rewritten command is not rewritten again.
