@@ -206,6 +206,6 @@ Without a terminal, approve needs the digest you inspected, deny and defer need
 request from their own AGSUDO_SESSION. Errors are JSON on stderr; conflict
 means the request's state or digest no longer allows the decision.
 
-To react to new requests, agsudo --json watch follows NDJSON events; resume
-with --after the last sequence you processed. Decide with the digest in the
-event's request snapshot.`
+To react to new requests, start agsudo --json watch before listing with review
+so nothing is missed; it follows NDJSON events, and --after resumes after the
+last sequence you processed. Decide with the digest in each event's snapshot.`

@@ -10,6 +10,7 @@ import (
 
 	"github.com/agyard/agsudo/internal/api"
 	"github.com/agyard/agsudo/internal/client"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 )
 
@@ -36,8 +37,8 @@ func newDecision(o *options, action string) *cobra.Command {
 		Long: short + `.
 
 The helper records your UID and session; --actor and --metadata are
-self-reported labels. At a terminal, approve shows the request and asks for
-confirmation. Without one, other guardrails apply; see agsudo help --reviewer.`,
+self-reported labels. Without a terminal, guardrails apply; see
+agsudo help --reviewer.`,
 		Example: map[string]string{
 			"approve": "  agsudo approve req_ID --expect-digest DIGEST --reason 'installs the requested build dependency'",
 			"deny":    "  agsudo deny req_ID --reason 'replaces /etc/hosts instead of adding one entry'",
@@ -72,6 +73,7 @@ confirmation. Without one, other guardrails apply; see agsudo help --reviewer.`,
 	cmd.Flags().StringToStringVar(&metadata, "metadata", nil, "Audit metadata as key=value pairs (repeatable)")
 	switch action {
 	case "approve":
+		cmd.Long += "\nAt a terminal, approve shows the request and asks for confirmation."
 		cmd.Flags().StringVar(&expect, "expect-digest", "", "Fail unless the request still has the digest you inspected")
 	case "defer":
 		cmd.Flags().StringVar(&summary, "summary", "", "One-line description for the human reviewer")
@@ -91,7 +93,11 @@ func confirmApproval(cmd *cobra.Command, id string) (string, error) {
 	if width := terminalWidth(cmd.OutOrStdout()); width > 0 {
 		text = wrap(text, width)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "%s\n\nApprove %s? [y/N] ", text, r.ID)
+	prompt := "Approve " + approvalTarget(r)
+	if width := terminalWidth(cmd.OutOrStdout()); width > 0 {
+		prompt = ansi.Truncate(prompt, width-len(r.ID)-12, "…")
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s\n\n%s (%s)? [y/N] ", text, prompt, r.ID)
 	answer, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 	if !strings.EqualFold(strings.TrimSpace(answer), "y") {
 		return "", api.Err("aborted", "%s was not approved", r.ID)
@@ -174,7 +180,7 @@ and the same session filter, or use --after 0 for everything.`,
 	return cmd
 }
 func streamEvents(cmd *cobra.Command, jsonOut bool, session, id string, cursor int64, follow bool) error {
-	if cursor < -1 {
+	if cursor < -1 || !follow && cursor < 0 {
 		return usage("--after must be a sequence number")
 	}
 	for {

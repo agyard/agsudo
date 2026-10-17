@@ -327,19 +327,19 @@ func (m *reviewModel) View() tea.View {
 	}
 	foot := "a approve  d deny  / filter  h history  q quit\n↑/↓ select  PgUp/PgDn details  r refresh"
 	if m.confirm != nil {
-		title := strings.ToUpper(m.action) + " "
-		if m.action == "approve" && m.confirm.Spec.Scope == "shell_session" {
-			title += "SHELL (authorizes everything run in it) "
+		title := "DENY " + command(*m.confirm)
+		if m.action == "approve" {
+			title = "APPROVE " + approvalTarget(*m.confirm)
 		}
-		title += command(*m.confirm)
 		foot = accent.Render(ansi.Truncate(title, m.width-4, "…")) + "\n" + m.reason.View()
 	}
 	if m.busy {
 		foot = "Saving decision…"
 	}
 	status := api.Safe(m.status, false)
-	if more := m.details.TotalLineCount() - m.details.YOffset() - m.details.Height(); status == "" && more > 0 {
-		status = fmt.Sprintf("↓ %d more lines of details (PgDn)", more)
+	// The details may hide the end of a long command; say so before anything else.
+	if more := m.details.TotalLineCount() - m.details.YOffset() - m.details.Height(); more > 0 {
+		status = strings.TrimSuffix(fmt.Sprintf("↓ %d more lines of details (PgDn) · %s", more, status), " · ")
 	}
 	style := muted
 	if m.errorStatus {

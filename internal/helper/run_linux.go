@@ -21,14 +21,12 @@ import (
 // runRequest replaces the CLI process, so the caller's terminal, signals and
 // exit status reach this monitor directly. Like sudo, it exits 1 when the
 // command does not start, otherwise with the command's status or 128 + signal.
-func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, ui executionUI) int {
+func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, signals chan os.Signal, ui executionUI) int {
 	// Linux parent-death signals refer to the creating thread. Keep that thread
 	// alive for the entire monitored execution, even while waiting in Go code.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	ctx := context.Background()
-	signals := make(chan os.Signal, 8)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(signals)
 	self := proc.Identity(os.Getpid())
 	if self.PID == 0 {

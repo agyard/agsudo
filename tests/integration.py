@@ -257,7 +257,7 @@ class Integration(unittest.TestCase):
         # A person at a terminal sees the request, confirms, and decides it.
         tty = Terminal(["approve", req["id"]], self.env)
         self.addCleanup(tty.close)
-        tty.until(f"Approve {req['id']}? [y/N]")
+        tty.until(f"Approve true ({req['id']})? [y/N]")
         tty.send("y\r")
         tty.until(f"{req['id']} approved")
         self.assertEqual(tty.wait(), 0)

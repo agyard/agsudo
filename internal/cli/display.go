@@ -100,6 +100,14 @@ func terminalWidth(out io.Writer) int {
 	}
 	return 0
 }
+
+// approvalTarget is what an approval covers, warning that a shell covers all.
+func approvalTarget(r api.Request) string {
+	if r.Spec.Scope == "shell_session" {
+		return "SHELL (authorizes everything run in it) " + command(r)
+	}
+	return command(r)
+}
 func when(t time.Time) string { return t.Local().Format(time.DateTime + " MST") }
 func requestText(r api.Request) string {
 	var b strings.Builder

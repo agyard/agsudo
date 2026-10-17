@@ -98,7 +98,7 @@ func submit(ctx context.Context, e executionFlags, args []string, sudo bool) err
 		if err != nil {
 			return err
 		}
-		if e.nonInteractive && r.State != "approved" {
+		if e.nonInteractive && r.Waiting() {
 			return api.Err("pending", "%s is %s; -n does not wait. Once it is approved, run the same command again", r.ID, r.State)
 		}
 		e.id = r.ID
@@ -264,7 +264,7 @@ func sudo(ctx context.Context, args []string, out, errOut io.Writer) int {
 	switch {
 	case err != nil:
 		err = usage("%v", err)
-	case preserve != "":
+	case f.Changed("preserve-env"):
 		err = usage("the environment is always sanitized; pass variables with: sudo env NAME=VALUE COMMAND")
 	case help:
 		fmt.Fprintln(out, requesterHelp)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -105,6 +106,11 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, "agsudo-helper is an internal program; use agsudo --help")
 		return 2
 	}
+	// Catch signals first, so even an immediate Ctrl-C cancels the request.
+	signals := make(chan os.Signal, 8)
+	if run {
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	}
 	ui := executionUI{"agsudo", "agsudo help --requester"}
 	if args[0] == "run-sudo" {
 		ui = executionUI{"sudo", "sudo --help"}
@@ -147,7 +153,7 @@ func Main(args []string) int {
 	}
 	defer s.Close()
 	if run {
-		return runRequest(s, c, a, in.ID, umask, ui)
+		return runRequest(s, c, a, in.ID, umask, signals, ui)
 	}
 	data, err := dispatch(context.Background(), s, c, a, gid, in)
 	return respond(data, err)

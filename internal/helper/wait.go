@@ -55,9 +55,13 @@ func waitForApproval(ctx context.Context, s *store.Store, a store.Access, id str
 			problem = "only the requester can execute " + id
 		case r.State == "approved":
 			return r, 0
-		case r.State == "denied" && r.Decision != nil && r.Decision.Reason != "":
-			problem = id + " was denied: " + r.Decision.Reason
-		case r.State == "denied", r.State == "expired", r.State == "canceled":
+		case r.State == "denied":
+			reason := "no reason given"
+			if r.Decision != nil && r.Decision.Reason != "" {
+				reason = r.Decision.Reason
+			}
+			problem = id + " was denied: " + reason + " (to ask again, add or change --reason)"
+		case r.State == "expired", r.State == "canceled":
 			problem = id + " is " + r.State + "; command was not started"
 		case r.State == "running":
 			problem = id + " is already running in another process"
