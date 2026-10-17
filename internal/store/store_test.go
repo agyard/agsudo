@@ -27,7 +27,7 @@ func testStore(t *testing.T) (*Store, string) {
 }
 func create(t *testing.T, s *Store) api.Request {
 	t.Helper()
-	r, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: s.Now().Add(time.Hour), Spec: api.Spec{Argv: []string{"id"}, Session: "test-session"}})
+	r, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: s.Now().Add(time.Hour), Spec: api.Spec{Argv: []string{"id", api.ID("")}, Session: "test-session"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func create(t *testing.T, s *Store) api.Request {
 }
 func approve(t *testing.T, s *Store, r api.Request) api.Request {
 	t.Helper()
-	out, err := s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, r.Digest)
+	out, err := s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Digest: r.Digest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestOneShotExecutionAndAudit(t *testing.T) {
 	s, _ := testStore(t)
 	r := create(t, s)
 	r = approve(t, s, r)
-	if _, err := s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, r.Digest); err != nil {
+	if _, err := s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Digest: r.Digest}); err != nil {
 		t.Fatal(err)
 	}
 	p := api.Process{PID: 123, Start: "456", Boot: "test"}
@@ -104,7 +104,7 @@ func TestConcurrentFirstOpen(t *testing.T) {
 				return
 			}
 			defer s.Close()
-			_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: time.Now().Add(time.Minute)})
+			_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, Detached: true, ExpiresAt: time.Now().Add(time.Minute), Spec: api.Spec{Argv: []string{api.ID("")}}})
 			results <- err
 		}()
 	}
@@ -166,18 +166,18 @@ func TestCancelCompetesWithExecutionAcrossConnections(t *testing.T) {
 func TestLateApprovalAndDigestMismatch(t *testing.T) {
 	s, _ := testStore(t)
 	r := create(t, s)
-	_, err := s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, "wrong")
+	_, err := s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Digest: "wrong"})
 	code(t, err, "conflict")
 	_, err = s.Cancel(testContext, r.ID, owner, "no longer needed")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, r.Digest)
+	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Digest: r.Digest})
 	code(t, err, "conflict")
 	r = create(t, s)
 	now := r.ExpiresAt
 	s.Now = func() time.Time { return now }
-	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, r.Digest)
+	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Digest: r.Digest})
 	code(t, err, "conflict")
 	got, err := s.Get(testContext, r.ID, owner)
 	if err != nil || got.State != "expired" {
@@ -190,9 +190,9 @@ func TestAccessAndReviewerCannotExecuteSomeoneElsesRequest(t *testing.T) {
 	r := create(t, s)
 	_, err := s.Get(testContext, r.ID, Access{UID: 1001})
 	code(t, err, "not_found")
-	_, err = s.Decide(testContext, r.ID, Access{UID: 1000}, api.Decision{Action: "approve"}, "")
+	_, err = s.Decide(testContext, r.ID, Access{UID: 1000}, api.Decision{Action: "approve"}, Check{})
 	code(t, err, "forbidden")
-	r, err = s.Decide(testContext, r.ID, Access{UID: 1001, Reviewer: true}, api.Decision{Action: "approve"}, r.Digest)
+	r, err = s.Decide(testContext, r.ID, Access{UID: 1001, Reviewer: true}, api.Decision{Action: "approve"}, Check{Digest: r.Digest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestAccessAndReviewerCannotExecuteSomeoneElsesRequest(t *testing.T) {
 func TestDeferKeepsSuggestionAndCrashNeverRetries(t *testing.T) {
 	s, _ := testStore(t)
 	r := create(t, s)
-	r, err := s.Decide(testContext, r.ID, owner, api.Decision{Action: "defer", Reason: "need a person", Recommend: "approve"}, r.Digest)
+	r, err := s.Decide(testContext, r.ID, owner, api.Decision{Action: "defer", Reason: "need a person", Recommend: "approve"}, Check{Digest: r.Digest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestAuditFailureRollsBackApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, r.Digest)
+	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Digest: r.Digest})
 	if err == nil {
 		t.Fatal("approved despite audit failure")
 	}
@@ -272,15 +272,38 @@ func TestOnDemandExpiryAndQueueQuota(t *testing.T) {
 	}
 	// Expired requests in other sessions do not count against the quota.
 	for range 255 {
-		if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Second), Spec: api.Spec{Session: "a"}}); err != nil {
+		if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Second), Spec: api.Spec{Argv: []string{api.ID("")}, Session: "a"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour)})
+	_, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour), Spec: api.Spec{Argv: []string{"another"}}})
 	code(t, err, "queue_full")
 	now = now.Add(time.Second)
 	if _, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: now.Add(time.Hour), Spec: api.Spec{Session: "b"}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRepeatedCommandReusesRequestAndGuardsDecisions(t *testing.T) {
+	s, _ := testStore(t)
+	r := create(t, s)
+	again, err := s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: r.Spec})
+	if err != nil || again.ID != r.ID {
+		t.Fatalf("identical command created another request: %s %v", again.ID, err)
+	}
+	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{Session: r.Spec.Session})
+	code(t, err, "forbidden")
+	if _, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "defer"}, Check{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Decide(testContext, r.ID, owner, api.Decision{Action: "approve"}, Check{PendingOnly: true})
+	code(t, err, "conflict")
+	r = approve(t, s, r)
+	if _, err = s.ClaimExecution(testContext, r.ID, owner, api.Process{PID: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if again, err = s.Create(testContext, api.Request{ID: api.ID("req_"), OwnerUID: 1000, ExpiresAt: s.Now().Add(time.Hour), Spec: r.Spec}); err != nil || again.ID == r.ID {
+		t.Fatalf("a used request was reused: %v", err)
 	}
 }
 

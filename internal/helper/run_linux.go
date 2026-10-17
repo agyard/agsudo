@@ -35,8 +35,19 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 		ui.message("cannot establish process identity")
 		return 1
 	}
-	if code, ok := waitForApproval(ctx, s, a, id, signals, ui); !ok {
+	r, code, ok := waitForApproval(ctx, s, a, id, signals, ui)
+	if !ok {
 		return code
+	}
+	// Hash before claiming, so a signal meanwhile still leaves the grant unused.
+	f, digest, openErr := executableFile(r.Spec.Executable)
+	if f != nil {
+		defer f.Close()
+	}
+	select {
+	case sig := <-signals:
+		return interrupt(ctx, s, a, id, sig, ui)
+	default:
 	}
 	// Cancellation and consumption compete in one transaction. After consumption
 	// the grant cannot be reused, including after a crash or failed exec.
@@ -55,11 +66,9 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 		}
 		return code
 	}
-	f, digest, err := executableFile(r.Spec.Executable)
-	if err != nil {
-		return finish(1, "open executable: "+err.Error())
+	if openErr != nil {
+		return finish(1, "open executable: "+openErr.Error())
 	}
-	defer f.Close()
 	if digest != r.Spec.ExecutableSHA256 {
 		return finish(1, "executable changed after submission; submit a new request")
 	}
@@ -84,20 +93,15 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 	cmd.Env = append(append([]string(nil), r.Spec.Environment...), "AGSUDO_REQUEST_ID="+r.ID)
 	cmd.ExtraFiles = []*os.File{f}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	// Share the terminal only when it is ours: a background job must neither
-	// signal the foreground job nor take the terminal back when it finishes.
+	// With a terminal, the command stays in the caller's job, so job control
+	// and keyboard signals reach both. The terminal is reclaimed afterwards
+	// from the command's finished jobs, never from another live job.
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR|syscall.O_NOCTTY, 0)
-	foreground := false
-	if err == nil {
+	hasTTY := err == nil
+	if hasTTY {
 		defer tty.Close()
-		pgrp, e := unix.IoctlGetInt(int(tty.Fd()), unix.TIOCGPGRP)
-		foreground = e == nil && pgrp == syscall.Getpgrp()
-	}
-	if foreground {
 		state, _ := term.GetState(int(tty.Fd()))
 		defer func() {
-			// Reclaim the terminal from the command's finished jobs, but never
-			// from a live job that the caller's shell moved to the foreground.
 			pgrp, e := unix.IoctlGetInt(int(tty.Fd()), unix.TIOCGPGRP)
 			if e != nil || (pgrp != syscall.Getpgrp() && syscall.Kill(-pgrp, 0) != syscall.ESRCH) {
 				return
@@ -110,7 +114,7 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 			signal.Reset(syscall.SIGTTOU)
 		}()
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: !foreground, Pdeathsig: syscall.SIGKILL}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: !hasTTY, Pdeathsig: syscall.SIGKILL}
 	if !c.Dev {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: r.Spec.Target.UID, Gid: r.Spec.Target.GID, Groups: r.Spec.Target.Groups}
 	}
@@ -121,18 +125,14 @@ func runRequest(s *store.Store, c Config, a store.Access, id string, umask int, 
 	if err != nil {
 		return finish(1, err.Error())
 	}
+	// Like sudo, signal only the command; an interactive shell passes hangups
+	// on to its own jobs. Keyboard signals already reached the shared job.
 	forward := func(sig syscall.Signal) {
-		if !foreground {
+		if !hasTTY {
 			_ = syscall.Kill(-cmd.Process.Pid, sig)
-			return
+		} else if sig != syscall.SIGINT && sig != syscall.SIGQUIT {
+			_ = cmd.Process.Signal(sig)
 		}
-		// An interactive shell may have moved one of its jobs to the foreground.
-		if pgrp, e := unix.IoctlGetInt(int(tty.Fd()), unix.TIOCGPGRP); e == nil && pgrp > 0 && pgrp != syscall.Getpgrp() {
-			_ = syscall.Kill(-pgrp, sig)
-		} else if sig == syscall.SIGINT || sig == syscall.SIGQUIT {
-			return // The terminal already signaled the process group we share.
-		}
-		_ = cmd.Process.Signal(sig)
 	}
 	if _, err = s.Started(ctx, r.ID, a, self, cmd.Process.Pid); err != nil {
 		forward(syscall.SIGKILL)

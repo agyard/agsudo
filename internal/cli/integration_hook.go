@@ -32,7 +32,7 @@ func integrationEnvironment(dir, host, session string) string {
 }
 
 // Claude adds SessionStart output to the model's context.
-const sessionNotice = "sudo in this session waits for approval through AG-sudo; if a sudo call times out, see 'sudo --help' to resume it."
+const sessionNotice = "sudo in this session waits for a person or reviewing agent to approve each command (AG-sudo). If a sudo call times out, its request stays pending: ask for approval of the request ID it printed, then run the same command again. Details: sudo --help"
 
 func runIntegrationHook(host string, input io.Reader, output io.Writer) error {
 	if host != "codex" && host != "claude" {

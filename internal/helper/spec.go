@@ -122,7 +122,7 @@ func resolve(name, cwd, path string) (string, error) {
 	case strings.ContainsRune(name, '='):
 		return "", api.Err("invalid_command", "environment assignments such as %q are not supported; the environment is sanitized", name)
 	case strings.ContainsRune(name, '/'):
-		return "", api.Err("command_not_found", "%q is not an executable file", name)
+		return "", api.Err("invalid_command", "%q is not an executable file", name)
 	}
 	return "", api.Err("command_not_found", "%q not found in the secure PATH %s", name, path)
 }

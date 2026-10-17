@@ -73,7 +73,7 @@ sed -i 's/"allowed_uids": \[1000\]/"allowed_uids": [1000, 1001]/' /etc/agsudo/co
         req = self.request("id")
         p = self.call("show", req["id"], "--json", uid=1001, check=False)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "not_found")
-        p = self.call("approve", req["id"], "--actor", "root", "--json", uid=1001, check=False)
+        p = self.call("approve", req["id"], "--expect-digest", req["digest"], "--actor", "root", "--json", uid=1001, check=False)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "forbidden")
         p = self.call("doctor", "--json", uid=12345, check=False)
         self.assertEqual(json.loads(p.stderr)["error"]["code"], "forbidden")

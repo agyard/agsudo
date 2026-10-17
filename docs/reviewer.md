@@ -46,7 +46,10 @@ multiple reviewers can read a request, while transactions serialize final
 decisions and the first valid decision wins. Retrying the same final decision
 from the same UID does not add events. Because a human and an agent sharing a
 UID cannot be told apart, keeping deferred requests for a human is a policy the
-reviewer agent must follow, not something AG-sudo enforces.
+reviewer agent must follow. With `--json`, AG-sudo only refuses to decide
+`needs_human` requests and requires `--expect-digest` for approval, and it
+refuses approvals from the requester's own session; these rails catch mistakes,
+not a determined agent.
 
 For event-driven review, send only current requests that need review to your
 agent loop. Avoid automatically reviewing a request again because of events such

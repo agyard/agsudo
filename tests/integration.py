@@ -152,7 +152,7 @@ class Integration(unittest.TestCase):
         time.sleep(1.05)
         self.assertEqual(self.data("status", req["id"])["state"], "expired")
         p = self.call("exec", "--request", req["id"], check=False)
-        self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: {req['id']} was expired; command was not started\n"))
+        self.assertEqual((p.returncode, p.stderr), (1, f"agsudo: {req['id']} expired; command was not started\n"))
 
     def test_context_and_changed_executable(self):
         script = Path(self.temp.name) / "script"
@@ -180,8 +180,9 @@ class Integration(unittest.TestCase):
         self.assertEqual(p.stdout, "input\narg:--not-an-agsudo-option adjacent")
 
     def process(self, *args, executable=CLI):
+        # A new session lets tests signal the whole process group, as agent hosts do.
         p = subprocess.Popen([executable, *args], env=self.env, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
         def cleanup():
             if p.poll() is None:
                 p.send_signal(signal.SIGINT)
@@ -218,15 +219,19 @@ class Integration(unittest.TestCase):
         self.assertEqual(p.communicate(timeout=10)[1], f"agsudo: canceled {rid}; command was not started\n")
         self.assertEqual(self.data("status", rid)["state"], "canceled")
         self.assertNotEqual(self.call("approve", rid, check=False).returncode, 0)
+        target = Path(self.temp.name) / "out.txt"
+        piped = f"printf data | sudo tee {target}"
         for sig in (signal.SIGTERM, signal.SIGKILL):
-            p, rid = self.start_waiting("wrap", "--", "sudo", "printf", "resumed")
-            p.send_signal(sig)
+            p, rid = self.start_waiting("wrap", "--session", "host", "--", "sh", "-c", piped)
+            os.killpg(p.pid, sig)
             _, stderr = p.communicate(timeout=10)
             if sig == signal.SIGTERM:
-                self.assertEqual(p.returncode, 128 + sig)
-                self.assertIn(f"agsudo exec --request {rid}", stderr)
+                self.assertIn(f"{rid} stays pending", stderr)
             self.approve(self.data("status", rid))
-            self.assertEqual(self.call("exec", "--request", rid).stdout, "resumed")
+            # Running the same command again reuses the request, pipe included.
+            again = self.call("wrap", "--session", "host", "--", "sh", "-c", piped)
+            self.assertEqual((again.stdout, target.read_text()), ("data", "data"))
+            self.assertEqual(self.data("status", rid)["state"], "exited")
 
     def test_wrap_intercepts_sudo_and_preserves_args(self):
         p, rid = self.start_waiting("wrap", "--", "sh", "-c", "sudo printf '%s' --json")
@@ -236,6 +241,19 @@ class Integration(unittest.TestCase):
         self.approve(req)
         stdout, stderr = p.communicate(timeout=10)
         self.assertEqual((p.returncode, stdout), (0, "--json"), stderr)
+
+    def test_reviewer_guardrails(self):
+        req = self.request("true", options=("--session", "mine"))
+        p = self.call("--json", "approve", req["id"], check=False)
+        self.assertEqual(p.returncode, 2)
+        self.env["AGSUDO_SESSION"] = "mine"
+        p = self.call("--json", "approve", req["id"], "--expect-digest", req["digest"], check=False)
+        self.assertEqual(json.loads(p.stderr)["error"]["code"], "forbidden")
+        del self.env["AGSUDO_SESSION"]
+        self.data("defer", req["id"])
+        p = self.call("--json", "approve", req["id"], "--expect-digest", req["digest"], check=False)
+        self.assertIn("deferred to a person", json.loads(p.stderr)["error"]["message"])
+        self.assertEqual(self.call("approve", req["id"]).stdout, f"{req['id']} approved\n")
 
     def test_noninteractive_and_json_usage(self):
         p = self.call("wrap", "--", "sudo", "-n", "true", check=False)

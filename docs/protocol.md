@@ -46,11 +46,11 @@ stateDiagram-v2
     running --> unknown: monitor disappeared
 ```
 
-Approval never starts a command by itself. A waiting `sudo` or `agsudo exec` starts it; otherwise the requester runs `agsudo exec --request ID`, at most once. Ctrl-C (SIGINT or SIGQUIT) while waiting cancels the request. Any other end of a wait — SIGTERM, SIGHUP, SIGKILL, a closed terminal — leaves the request as it is, so it can be resumed until it expires.
+Approval never starts a command by itself. A waiting `sudo` or `agsudo exec` starts it; otherwise the requester runs `agsudo exec --request ID`, at most once. Ctrl-C (SIGINT or SIGQUIT) while waiting cancels the request. Any other end of a wait — SIGTERM, SIGHUP, SIGKILL — leaves the request as it is until it expires. Submitting a request whose digest equals one of the owner's unused (pending, needs_human or approved) requests returns that request instead of creating another; since the digest covers the session, running the same command again in the same session resumes it.
 
 `running` starts with consuming the grant, before spawning the program. `command_pid` appears after successful spawn. Thus a crash during launch can become `unknown`, even if the program never started. Never retry such a grant automatically.
 
-Same-action approve/deny retries from the same UID are idempotent while that final decision is still current. Opposing decisions conflict. `defer` updates the suggestion while keeping the immutable command; its state becomes `needs_human`. Manual approval retains that suggestion for later comparison. Suggestions and metadata are attribution, not verified identities or safety ground truth.
+Decisions with `--json` set `pending_only`, so `needs_human` requests are left to people, and `approve` with `--json` requires `--expect-digest`. Approving a request whose session equals the caller's `AGSUDO_SESSION` is `forbidden`. These are guardrails against agent mistakes, not authentication. Same-action approve/deny retries from the same UID are idempotent while that final decision is still current. Opposing decisions conflict. `defer` updates the suggestion while keeping the immutable command; its state becomes `needs_human`. Manual approval retains that suggestion for later comparison. Suggestions and metadata are attribution, not verified identities or safety ground truth.
 
 No always-on process is necessary: lifecycle checks run during queries, decisions and execution, so expiry and lost executions produce events without a daemon. An execution monitor is identified by kernel PID, process start time and boot ID.
 

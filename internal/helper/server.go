@@ -105,7 +105,7 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, "agsudo-helper is an internal program; use agsudo --help")
 		return 2
 	}
-	ui := executionUI{sudo: args[0] == "run-sudo", out: os.Stderr}
+	ui := executionUI{sudo: args[0] == "run-sudo"}
 	fail := func(err error) int {
 		if run {
 			ui.message("%v", err)
@@ -187,7 +187,7 @@ func dispatch(ctx context.Context, s *store.Store, c Config, a store.Access, gid
 		return s.List(ctx, a, in.States, in.Session, in.Cursor, in.Limit)
 	case "decide":
 		d := api.Decision{Action: in.Action, Actor: api.Actor{UID: a.UID, Label: in.Actor}, Reason: in.Reason, Summary: in.Summary, Recommend: in.Recommend, Metadata: in.Metadata}
-		return s.Decide(ctx, in.ID, a, d, in.ExpectDigest)
+		return s.Decide(ctx, in.ID, a, d, store.Check{Digest: in.ExpectDigest, Session: in.Session, PendingOnly: in.PendingOnly})
 	case "cancel":
 		return s.Cancel(ctx, in.ID, a, in.Reason)
 	case "events":

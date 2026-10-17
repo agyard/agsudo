@@ -104,6 +104,10 @@ func editIntegration(root map[string]any, host, exe string, install bool) error 
 	if !ok {
 		return api.Err("configuration", "hooks must be a JSON object")
 	}
+	// An identical handler stays where it is; stale ones are removed. Keys are
+	// only deleted when emptied by this edit, so a no-op leaves the file alone.
+	want := shellQuote(exe) + " integration hook " + host + integrationMarker(host)
+	removedAny := false
 	for _, event := range integrationEvents(host) {
 		groups := []any{}
 		if raw, exists := hooks[event]; exists {
@@ -114,6 +118,7 @@ func editIntegration(root map[string]any, host, exe string, install bool) error 
 			}
 		}
 		kept := make([]any, 0, len(groups)+1)
+		found, removed := false, false
 		for _, raw := range groups {
 			group, ok := raw.(map[string]any)
 			if !ok {
@@ -131,7 +136,11 @@ func editIntegration(root map[string]any, host, exe string, install bool) error 
 				}
 				command, _ := handler["command"].(string)
 				if handler["type"] == "command" && strings.HasSuffix(command, integrationMarker(host)) {
-					continue
+					if !install || found || command != want {
+						removed = true
+						continue
+					}
+					found = true
 				}
 				remaining = append(remaining, raw)
 			}
@@ -142,22 +151,21 @@ func editIntegration(root map[string]any, host, exe string, install bool) error 
 				kept = append(kept, group)
 			}
 		}
-		if install {
-			group := map[string]any{"hooks": []any{map[string]any{
-				"type": "command", "command": shellQuote(exe) + " integration hook " + host + integrationMarker(host), "timeout": 10,
-			}}}
+		if install && !found {
+			group := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": want, "timeout": 10}}}
 			if host == "codex" {
 				group["matcher"] = "^Bash$"
 			}
 			kept = append(kept, group)
 		}
-		if len(kept) == 0 {
-			delete(hooks, event)
-		} else {
+		if len(kept) > 0 {
 			hooks[event] = kept
+		} else if removed {
+			delete(hooks, event)
 		}
+		removedAny = removedAny || removed
 	}
-	if len(hooks) == 0 {
+	if len(hooks) == 0 && removedAny {
 		delete(root, "hooks")
 	}
 	return nil

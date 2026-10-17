@@ -99,6 +99,8 @@ func newReviewModel(ctx context.Context, b reviewBackend, states []string, sessi
 	l.DisableQuitKeybindings()
 	l.SetShowHelp(false)
 	l.Filter = substringFilter
+	l.Styles.TitleBar = l.Styles.TitleBar.PaddingBottom(0)
+	l.Styles.StatusBar = l.Styles.StatusBar.PaddingBottom(0)
 	v := viewport.New(viewport.WithWidth(60), viewport.WithHeight(18))
 	input := textinput.New()
 	input.Prompt = "Reason > "
@@ -139,10 +141,10 @@ func (m *reviewModel) layout() {
 		m.details.SetWidth(max(w-left-3, 15))
 		m.details.SetHeight(h)
 	} else {
-		top := max(6, h/3)
+		top := max(6, h/2)
 		m.queue.SetSize(w, top)
 		m.details.SetWidth(w)
-		m.details.SetHeight(max(4, h-top-1))
+		m.details.SetHeight(max(4, h-top))
 	}
 	m.reason.SetWidth(max(m.width-18, 10))
 }
@@ -160,7 +162,7 @@ func (m *reviewModel) syncDetails() {
 		m.details.GotoTop()
 		m.selectedID = r.ID
 	}
-	m.details.SetContent(ansi.Wrap(requestText(*r), m.details.Width(), ""))
+	m.details.SetContent(wrap(requestText(*r), m.details.Width()))
 }
 func (m *reviewModel) setError(err error) { m.status = err.Error(); m.errorStatus = true }
 
@@ -283,8 +285,17 @@ func (m *reviewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.reason.Focus()
 		}
 	}
+	// Clearing a filter keeps the selected request, not its row.
+	filtered, id := m.queue.FilterState() != list.Unfiltered, m.selectedID
 	var cmd tea.Cmd
 	m.queue, cmd = m.queue.Update(message)
+	if filtered && m.queue.FilterState() == list.Unfiltered {
+		for i, item := range m.queue.Items() {
+			if item.(reviewItem).request.ID == id {
+				m.queue.Select(i)
+			}
+		}
+	}
 	return m, cmd
 }
 func (m *reviewModel) View() tea.View {

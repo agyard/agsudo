@@ -118,8 +118,9 @@ sudo: waiting for approval of req_3f9c2a71d04b8e65; see 'sudo --help'
 ```
 
 Ctrl-C cancels the request. If an agent's tool call times out or is killed
-instead, the request stays pending and the agent resumes it with
-`agsudo exec --request ID`. See the [integration guide](integrations/README.md)
+instead, the request stays pending; once it is approved, running the same
+command again reuses the request and runs it. `sudo --help` and
+`agsudo help --requester` print the same short guide. See the [integration guide](integrations/README.md)
 for hook behavior, tested host versions, and limitations.
 
 ## Agent workflows
@@ -150,7 +151,10 @@ agsudo --json defer req_ID --recommend unknown --summary 'Restarts a service' \
   --reason 'Confirm that interrupting active users is acceptable'
 ```
 
-`defer` moves a request to `needs_human` for the TUI. Events can be followed with
+`defer` moves a request to `needs_human` for the TUI. With `--json`, `approve`
+requires `--expect-digest` and only pending requests can be decided, and nobody
+can approve a request from their own `AGSUDO_SESSION`. These rails catch agent
+mistakes; they are not a boundary against a hostile agent. Events can be followed with
 `agsudo --json watch --after SEQUENCE` and exported with
 `agsudo audit export --session ses_ID > trace.jsonl`. Events include requests,
 context, suggestions, decisions, and execution results, but not ordinary

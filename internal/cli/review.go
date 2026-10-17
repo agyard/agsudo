@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -18,7 +19,11 @@ func newShow(o *options) *cobra.Command {
 			if err := o.client().Call(cmd.Context(), api.Input{Operation: "get", ID: args[0]}, &r); err != nil {
 				return err
 			}
-			return o.print(cmd, r, requestText(r))
+			text := requestText(r)
+			if width := terminalWidth(cmd.OutOrStdout()); width > 0 {
+				text = wrap(text, width)
+			}
+			return o.print(cmd, r, text)
 		}}
 }
 func newDecision(o *options, action string) *cobra.Command {
@@ -27,15 +32,24 @@ func newDecision(o *options, action string) *cobra.Command {
 	short := map[string]string{"approve": "Approve one request for a single execution", "deny": "Reject a request", "defer": "Hand a request to a human reviewer with a suggestion"}[action]
 	cmd := &cobra.Command{Use: action + " REQUEST_ID", Short: short, Args: cobra.ExactArgs(1),
 		Long: short + `. The helper records your UID; --actor and --metadata are
-self-reported labels for the audit trail.`,
+self-reported labels for the audit trail. With --json, approve requires
+--expect-digest and only pending requests can be decided; people decide
+needs_human requests in review --tui or without --json. Nobody can approve a
+request from their own AGSUDO_SESSION.`,
 		Example: map[string]string{
 			"approve": "  agsudo approve req_ID --expect-digest DIGEST --reason 'installs the requested build dependency'",
 			"deny":    "  agsudo deny req_ID --reason 'replaces /etc/hosts instead of adding one entry'",
 			"defer":   "  agsudo defer req_ID --recommend deny --summary 'opens a root shell' --reason 'not needed for the task'",
 		}[action],
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if o.json && action == "approve" && expect == "" {
+				return usage(cmd, "--json approve requires --expect-digest with the digest you inspected")
+			}
 			var r api.Request
-			in := api.Input{Operation: "decide", ID: args[0], Action: action, Reason: reason, Summary: summary, Recommend: recommend, Actor: actor, ExpectDigest: expect, Metadata: metadata}
+			// Guardrails for agents, not a security boundary: JSON callers leave
+			// needs_human requests to people, and nobody approves their own session.
+			in := api.Input{Operation: "decide", ID: args[0], Action: action, Reason: reason, Summary: summary, Recommend: recommend, Actor: actor, ExpectDigest: expect, Metadata: metadata,
+				Session: os.Getenv("AGSUDO_SESSION"), PendingOnly: o.json}
 			if err := o.client().Call(cmd.Context(), in, &r); err != nil {
 				return err
 			}

@@ -47,8 +47,8 @@ Configuration is installed at `$CLAUDE_CONFIG_DIR/settings.json`, or
 The `SessionStart` and `CwdChanged` hooks append the same PATH and
 `AGSUDO_SESSION` line to the host-provided `CLAUDE_ENV_FILE`, which Claude's
 Bash tool reads before running commands. On `SessionStart`, the hook also prints
-one sentence that Claude adds to the model's context, so the agent knows that
-sudo waits for approval and how to resume after a tool timeout. There is no
+a short note that Claude adds to the model's context, so the agent knows that
+sudo waits for approval and how to continue after a tool timeout. There is no
 `PermissionRequest` auto-approval hook.
 
 This integration supports local Bash execution on Linux. For remote tasks,
@@ -60,7 +60,9 @@ not lift a host sandbox's restriction on setuid execution.
 Both integrations export `AGSUDO_SESSION` from the host session ID and make
 `sudo` and `agsudo` available through PATH; `agsudo help --requester` shows how
 an agent lists its session's requests. When a host times out a waiting sudo, the
-request stays pending and the agent resumes it with `agsudo exec --request ID`.
+request stays pending; once approved, running the same command again in the
+session reuses it, including any input piped to it. Inside these sessions an
+agent cannot approve its own requests with `agsudo approve`.
 
 Shells can still change PATH, define sudo functions, or invoke absolute paths
 such as `/usr/bin/sudo`; the integrations do not cover these cases. Codex may

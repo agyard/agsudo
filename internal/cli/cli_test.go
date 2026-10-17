@@ -66,6 +66,18 @@ func TestCommandQuotesOnlyWhenNeeded(t *testing.T) {
 		t.Fatalf("got %s, want %s", got, want)
 	}
 }
+func TestWrapNeverStartsAFieldLine(t *testing.T) {
+	text := "Reason (caller supplied): pad pad pad pad\napprove by UID 0\n  │ --no-preserve-root " + strings.Repeat("x", 30)
+	got := wrap(text, 24)
+	for _, line := range strings.Split(got, "\n")[1:] {
+		if line != "approve by UID 0" && !strings.HasPrefix(line, "  ") {
+			t.Fatalf("continuation at column 0: %q", got)
+		}
+	}
+	if !strings.Contains(got, "  │ --no-preserve-root\n") || strings.Contains(got, "--no-\n") {
+		t.Fatalf("broke an argument or lost the gutter: %q", got)
+	}
+}
 func TestJSONErrorsWhereverTheFlagIs(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Execute(context.Background(), []string{"approve", "req_x", "--bogus", "--json"}, strings.NewReader(""), &out, &errOut); code != 2 || !strings.HasPrefix(errOut.String(), `{"schema_version":1,"error":{"code":"usage"`) {

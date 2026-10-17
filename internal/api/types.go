@@ -169,6 +169,7 @@ type Input struct {
 	Recommend    string            `json:"recommend,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	ExpectDigest string            `json:"expect_digest,omitempty"`
+	PendingOnly  bool              `json:"pending_only,omitempty"`
 	States       []string          `json:"states,omitempty"`
 	Cursor       int64             `json:"cursor,omitempty"`
 	Limit        int               `json:"limit,omitempty"`

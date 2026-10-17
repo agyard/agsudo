@@ -120,14 +120,14 @@ func scan(ctx context.Context, c *sql.Conn, q string, args ...any) ([]api.Reques
 }
 
 // refresh performs lifecycle housekeeping on demand, without a timer service.
-func (s *Store) refresh(ctx context.Context, c *sql.Conn, filter string, args ...any) error {
+func (s *Store) refresh(ctx context.Context, c *sql.Conn, filter string, args ...any) ([]api.Request, error) {
 	rs, _, err := scan(ctx, c, "SELECT rowid,body FROM requests WHERE state IN ('pending','needs_human','approved','running')"+filter, args...)
 	for i := 0; err == nil && i < len(rs); i++ {
 		if kind := s.normalize(&rs[i]); kind != "" {
 			err = s.save(ctx, c, &rs[i], kind, lifecycle)
 		}
 	}
-	return err
+	return rs, err
 }
 
 // BEGIN IMMEDIATE avoids the deferred-transaction upgrade race between separate
@@ -174,12 +174,21 @@ func (s *Store) Create(ctx context.Context, r api.Request) (api.Request, error) 
 	r.SchemaVersion, r.State, r.CreatedAt = api.Version, "pending", s.Now()
 	r.Digest = api.Digest(r.Spec)
 	err := s.transaction(ctx, func(c *sql.Conn) error {
-		if err := s.refresh(ctx, c, " AND owner_uid=?", r.OwnerUID); err != nil {
+		rs, err := s.refresh(ctx, c, " AND owner_uid=?", r.OwnerUID)
+		if err != nil {
 			return err
 		}
-		var count int
-		if err := c.QueryRowContext(ctx, "SELECT count(*) FROM requests WHERE owner_uid=? AND state IN ('pending','needs_human','approved')", r.OwnerUID).Scan(&count); err != nil {
-			return err
+		count := 0
+		for _, old := range rs {
+			// Running the same command again in the same session (the digest
+			// covers both) attaches to its unused request instead of adding one.
+			if old.Unstarted() && old.Digest == r.Digest {
+				r = old
+				return nil
+			}
+			if old.Unstarted() {
+				count++
+			}
 		}
 		if count >= 256 {
 			return api.Err("queue_full", "at most 256 unconsumed requests per user; list and cancel stale requests")
@@ -248,7 +257,15 @@ func (s *Store) Get(ctx context.Context, id string, a Access) (api.Request, erro
 	return s.change(ctx, id, a, api.Actor{}, nil)
 }
 
-func (s *Store) Decide(ctx context.Context, id string, a Access, d api.Decision, expect string) (api.Request, error) {
+// Check binds a decision to what the reviewer inspected and who decides.
+// These are guardrails against mistakes, not authentication.
+type Check struct {
+	Digest      string // digest of the inspected request, if given
+	Session     string // the decider's own workflow session, if any
+	PendingOnly bool   // leave needs_human requests to people
+}
+
+func (s *Store) Decide(ctx context.Context, id string, a Access, d api.Decision, check Check) (api.Request, error) {
 	if !a.Reviewer && a.UID != 0 {
 		return api.Request{}, api.Err("forbidden", "this user is not an approver")
 	}
@@ -257,14 +274,17 @@ func (s *Store) Decide(ctx context.Context, id string, a Access, d api.Decision,
 	return s.change(ctx, id, a, d.Actor, func(r *api.Request) (string, error) {
 		// A repeat of the same final decision is safe and adds no duplicate event.
 		repeat := r.Decision != nil && r.Decision.Action == d.Action && r.Decision.Actor.UID == a.UID && (r.State == "approved" || r.State == "denied")
-		if !r.Waiting() && !repeat {
-			return "", api.Err("conflict", "cannot %s request in state %s", d.Action, r.State)
-		}
-		if expect != "" && expect != r.Digest {
+		switch {
+		case !r.Waiting() && !repeat:
+			return "", api.Err("conflict", "cannot %s %s: it is %s", d.Action, r.ID, r.State)
+		case check.Digest != "" && check.Digest != r.Digest:
 			return "", api.Err("conflict", "--expect-digest does not match %s; inspect it again with agsudo show", r.ID)
-		}
-		if repeat {
+		case repeat:
 			return "", nil
+		case check.PendingOnly && r.State == "needs_human":
+			return "", api.Err("conflict", "%s was deferred to a person; decide it in agsudo review --tui", r.ID)
+		case d.Action == "approve" && check.Session != "" && check.Session == r.Spec.Session:
+			return "", api.Err("forbidden", "%s belongs to your own session; ask the user or a reviewer to approve it", r.ID)
 		}
 		switch d.Action {
 		case "approve":
@@ -344,7 +364,7 @@ func (s *Store) List(ctx context.Context, a Access, states []string, session str
 	filter, args := scope(a, session)
 	page := api.List{Requests: []api.Request{}, NextCursor: cursor}
 	err := s.transaction(ctx, func(c *sql.Conn) error {
-		if err := s.refresh(ctx, c, filter, args...); err != nil {
+		if _, err := s.refresh(ctx, c, filter, args...); err != nil {
 			return err
 		}
 		q := "SELECT rowid,body FROM requests WHERE rowid>?" + filter
@@ -369,7 +389,7 @@ func (s *Store) Events(ctx context.Context, a Access, session, id string, cursor
 	filter, args := scope(a, session)
 	p := api.Page{Events: []api.Event{}, NextCursor: cursor}
 	err := s.transaction(ctx, func(c *sql.Conn) error {
-		if err := s.refresh(ctx, c, filter, args...); err != nil {
+		if _, err := s.refresh(ctx, c, filter, args...); err != nil {
 			return err
 		}
 		q := "SELECT sequence,body FROM events WHERE sequence>?" + filter

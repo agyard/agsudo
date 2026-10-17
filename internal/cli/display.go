@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/agyard/agsudo/internal/api"
 	"github.com/charmbracelet/x/ansi"
@@ -17,15 +18,16 @@ import (
 
 var plainArgument = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
-// command renders argv as shell words. Arguments with control or format
-// characters use $'...' escapes, so terminals never interpret them.
+// command renders argv as shell words. Arguments with invalid UTF-8 or any
+// character that is not plainly printable (controls, format characters, line
+// separators, non-ASCII spaces) use $'...' escapes, so nothing is hidden.
 func command(r api.Request) string {
 	words := make([]string, len(r.Spec.Argv))
 	for i, s := range r.Spec.Argv {
 		switch {
 		case plainArgument.MatchString(s):
 			words[i] = s
-		case api.Safe(s, false) == s:
+		case utf8.ValidString(s) && strings.IndexFunc(s, func(r rune) bool { return !strconv.IsPrint(r) }) < 0:
 			words[i] = shellQuote(s)
 		default:
 			q := strconv.Quote(s)
@@ -37,10 +39,54 @@ func command(r api.Request) string {
 
 // commandLabel marks shell sessions, whose approval covers everything run in them.
 func commandLabel(r api.Request) string {
-	if r.Spec.Scope == "shell_session" {
+	switch {
+	case r.Spec.Login:
+		return "login shell: " + command(r)
+	case r.Spec.Scope == "shell_session":
 		return "shell: " + command(r)
 	}
 	return command(r)
+}
+
+// wrap breaks lines at spaces, never inside a command argument such as
+// --no-preserve-root, and indents continuations, so wrapped untrusted text can
+// never start a line the way a field does. Text must already be sanitized.
+func wrap(text string, width int) string {
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		body := strings.TrimLeft(line, " │")
+		prefix, current := line[:len(line)-len(body)], ""
+		next := prefix + "  "
+		for i, word := range strings.Split(body, " ") {
+			switch {
+			case i == 0:
+				current = word
+			case ansi.StringWidth(prefix+current+" "+word) > width:
+				lines, prefix, current = append(lines, prefix+current), next, word
+			default:
+				current += " " + word
+			}
+			for ansi.StringWidth(prefix+current) > width {
+				head := ansi.Truncate(current, width-ansi.StringWidth(prefix), "")
+				if head == "" {
+					break
+				}
+				lines, prefix, current = append(lines, prefix+head), next, current[len(head):]
+			}
+		}
+		lines = append(lines, prefix+current)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// terminalWidth is the width of out if it is a terminal, otherwise 0.
+func terminalWidth(out io.Writer) int {
+	if file, ok := out.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		if cols, _, err := term.GetSize(int(file.Fd())); err == nil {
+			return cols
+		}
+	}
+	return 0
 }
 func when(t time.Time) string { return t.Local().Format("2006-01-02 15:04:05 MST") }
 func requestText(r api.Request) string {
@@ -61,8 +107,10 @@ func requestText(r api.Request) string {
 	field("Target", fmt.Sprintf("%s (UID %d)", api.Safe(r.Spec.Target.Name, false), r.Spec.Target.UID))
 	field("Session", api.Safe(r.Spec.Session, false))
 	field("Created", when(r.CreatedAt))
-	if r.Unstarted() {
-		field("Expires", when(r.ExpiresAt)+" (in "+time.Until(r.ExpiresAt).Round(time.Second).String()+")")
+	if left := time.Until(r.ExpiresAt).Round(time.Second); r.Unstarted() && left > 0 {
+		field("Expires", when(r.ExpiresAt)+" (in "+left.String()+")")
+	} else if r.Unstarted() {
+		field("Expires", when(r.ExpiresAt)+" (expired)")
 	}
 	field("Digest", r.Digest)
 	if r.Detached {
@@ -70,12 +118,13 @@ func requestText(r api.Request) string {
 	} else {
 		field("Submission", "sudo or agsudo exec; starts on approval if still waiting")
 	}
-	field("Reason (caller supplied)", api.Safe(r.Spec.Reason, true))
+	// Free text stays on one line, so it cannot imitate other fields.
+	field("Reason (caller supplied)", api.Safe(r.Spec.Reason, false))
 	for _, d := range []*api.Decision{r.Suggestion, r.Decision} {
 		if d != nil {
-			fmt.Fprintf(&b, "\n%s by UID %d %s at %s\n", d.Action, d.Actor.UID, api.Safe(d.Actor.Label, false), when(d.At))
-			field("Summary", api.Safe(d.Summary, true))
-			field("Reason", api.Safe(d.Reason, true))
+			fmt.Fprintf(&b, "\n%s by UID %d at %s %s\n", d.Action, d.Actor.UID, when(d.At), api.Safe(d.Actor.Label, false))
+			field("Summary", api.Safe(d.Summary, false))
+			field("Reason", api.Safe(d.Reason, false))
 			if d.Action == "defer" {
 				field("Recommendation", d.Recommend)
 			}
@@ -84,13 +133,14 @@ func requestText(r api.Request) string {
 	if r.ExitCode != nil {
 		field("Exit status", strconv.Itoa(*r.ExitCode))
 	}
-	field(map[bool]string{true: "Canceled", false: "Failure"}[r.State == "canceled"], api.Safe(r.Failure, true))
+	field(map[bool]string{true: "Canceled", false: "Failure"}[r.State == "canceled"], api.Safe(r.Failure, false))
 	b.WriteString("\nEnvironment (sanitized):\n")
 	for _, value := range r.Spec.Environment {
 		fmt.Fprintf(&b, "  %s\n", api.Safe(value, false))
 	}
 	for _, f := range r.Spec.Context {
-		fmt.Fprintf(&b, "\nContext (caller-supplied snapshot from submission): %s\nSHA256: %s\n%s\n", api.Safe(f.Path, false), f.SHA256, api.Safe(f.Content, true))
+		content := "  │ " + strings.ReplaceAll(strings.TrimSuffix(api.Safe(f.Content, true), "\n"), "\n", "\n  │ ")
+		fmt.Fprintf(&b, "\nContext (caller-supplied snapshot from submission): %s\nSHA256: %s\n%s\n", api.Safe(f.Path, false), f.SHA256, content)
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -109,18 +159,24 @@ func printRequests(out io.Writer, requests []api.Request) error {
 			w[i] = max(w[i], ansi.StringWidth(cell))
 		}
 	}
-	width := math.MaxInt
-	if file, ok := out.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
-		if cols, _, err := term.GetSize(int(file.Fd())); err == nil {
-			width = cols
-		}
+	width := terminalWidth(out)
+	if width == 0 {
+		width = math.MaxInt
 	}
-	// IDs, states and targets stay whole; the reason shrinks before the command.
+	// IDs, states and targets stay whole; the reason shrinks before the
+	// command and is dropped in very narrow terminals.
 	truncated := false
-	if avail := width - w[0] - w[1] - w[2] - 6; w[3]+2+w[4] > avail && avail >= 21 {
-		w[4] = max(avail-2-w[3], min(w[4], 12))
-		w[3] = avail - 2 - w[4]
+	if avail := width - w[0] - w[1] - w[2] - 6; w[3]+2+w[4] > avail {
 		truncated = true
+		if avail >= 21 {
+			w[4] = max(avail-2-w[3], min(w[4], 12))
+			w[3] = avail - 2 - w[4]
+		} else {
+			w[3], w[4] = max(avail, 7), 0
+			for i := range rows {
+				rows[i] = rows[i][:4]
+			}
+		}
 	}
 	var b strings.Builder
 	for _, row := range rows {

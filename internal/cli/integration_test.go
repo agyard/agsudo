@@ -72,6 +72,31 @@ func TestIntegrationRefusesMalformedConfig(t *testing.T) {
 	}
 }
 
+func TestIntegrationNoOpsLeaveConfigAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"PreToolUse":[]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := updateIntegration(path, "codex", "/bin/agsudo", false); changed || err != nil {
+		t.Fatalf("uninstall without a handler changed the config: %v", err)
+	}
+	if _, err := updateIntegration(path, "codex", "/bin/agsudo", true); err != nil {
+		t.Fatal(err)
+	}
+	root := map[string]any{}
+	b, _ := os.ReadFile(path)
+	_ = json.Unmarshal(b, &root)
+	hooks := root["hooks"].(map[string]any)
+	hooks["PreToolUse"] = append(hooks["PreToolUse"].([]any), map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "later"}}})
+	b, _ = json.Marshal(root)
+	if err := os.WriteFile(path, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := updateIntegration(path, "codex", "/bin/agsudo", true); changed || err != nil {
+		t.Fatalf("reinstall moved an identical handler: %v", err)
+	}
+}
+
 func TestUninstallPreservesSiblingHandlers(t *testing.T) {
 	root := map[string]any{"hooks": map[string]any{"PreToolUse": []any{map[string]any{"matcher": "^Bash$", "hooks": []any{
 		map[string]any{"type": "command", "command": "'/old/agsudo' integration hook codex" + integrationMarker("codex")},

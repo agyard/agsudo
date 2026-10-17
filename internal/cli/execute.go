@@ -72,8 +72,8 @@ func (e executionFlags) input(args []string, detached bool) (api.Input, error) {
 		if err != nil {
 			return in, err
 		}
-		if !utf8.Valid(b) {
-			return in, api.Err("usage", "context must be UTF-8 text: %s", name)
+		if len(b) > 64<<10 || !utf8.Valid(b) {
+			return in, api.Err("usage", "context must be UTF-8 text of at most 64 KiB: %s", name)
 		}
 		in.Context = append(in.Context, api.File{Path: path, Content: string(b)})
 	}
@@ -94,9 +94,10 @@ func submit(ctx context.Context, e executionFlags, args []string, sudo bool) err
 			return err
 		}
 		e.id = r.ID
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+		if ctx.Err() != nil {
+			_ = c.Call(context.Background(), api.Input{Operation: "cancel", ID: e.id, Reason: "interrupted while submitting"}, nil)
+			return ctx.Err()
+		}
 	}
 	return c.Exec(e.id, sudo)
 }
@@ -151,10 +152,9 @@ new request.`,
 	if !detached {
 		cmd.Long += `
 
-Ctrl-C while waiting cancels the request; once the command runs, signals reach
-it. If the wait ends any other way (timeout, kill, hangup), the request stays
-pending: resume it with exec --request. A command that does not start exits 1
-and says why; otherwise exec exits with its status, or 128 + signal.`
+exec works like the sudo shim; see agsudo help --requester. Ctrl-C while
+waiting cancels the request. If the wait ends any other way, the request stays
+pending; running the same command again, or exec --request ID, resumes it.`
 		cmd.Example += "\n  agsudo exec --request req_ID"
 		cmd.Flags().StringVar(&e.id, "request", "", "Wait for and run this submitted request")
 	}
@@ -187,7 +187,7 @@ not. Ordinary commands are not traced.`,
 				session = api.ID("ses_")
 			}
 			if !api.ValidSession(session) {
-				return usage(cmd, "session labels use 1-128 letters, digits and _.:-")
+				return usage(cmd, "session label %q (from --session or AGSUDO_SESSION) must be 1-128 letters, digits or _.:-", session)
 			}
 			dir, err := ensureShim()
 			if err != nil {
@@ -203,7 +203,10 @@ not. Ordinary commands are not traced.`,
 			if err != nil {
 				return err
 			}
-			helper, err := filepath.Abs(client.New().Helper)
+			helper, err := exec.LookPath(client.New().Helper)
+			if err == nil {
+				helper, err = filepath.Abs(helper)
+			}
 			if err != nil {
 				return err
 			}
@@ -273,12 +276,11 @@ func sudo(ctx context.Context, args []string, in io.Reader, out, errOut io.Write
 	f.BoolVarP(&nonInteractive, "non-interactive", "n", false, "")
 	f.BoolVarP(&reset, "reset-timestamp", "k", false, "")
 	if err := f.Parse(args); err != nil {
-		fmt.Fprintf(errOut, "sudo: %v; see 'sudo --help'\n", err)
-		return 2
+		return report(api.Err("usage", "%v; see 'sudo --help'", err), false, errOut, "sudo")
 	}
 	switch {
 	case help:
-		fmt.Fprintln(out, sudoHelp)
+		fmt.Fprintln(out, requesterHelp)
 		return 0
 	case version:
 		fmt.Fprintln(out, "sudo (AG-sudo)", Version)
@@ -292,21 +294,7 @@ func sudo(ctx context.Context, args []string, in io.Reader, out, errOut io.Write
 	err := submit(ctx, e, f.Args(), true)
 	var usageErr *api.Error
 	if errors.As(err, &usageErr) && usageErr.Code == "usage" {
-		fmt.Fprintf(errOut, "sudo: %s; see 'sudo --help'\n", usageErr.Message)
-		return 2
+		err = api.Err("usage", "%s; see 'sudo --help'", usageErr.Message)
 	}
 	return report(err, false, errOut, "sudo")
 }
-
-const sudoHelp = `sudo (AG-sudo): sudo [-u USER] [-H] [-s|-i] [--reason TEXT] [--] COMMAND [ARGS...]
-
-sudo here waits until a person or a reviewing agent approves the command, then
-runs it once; no password is asked. After two seconds it prints the request ID.
-Ctrl-C cancels the wait. If the wait ends any other way (a tool timeout, kill
-or hangup), the request stays pending; resume it with
-  agsudo exec --request REQUEST_ID
--n fails instead of waiting and -k is ignored. Other sudo options, environment
-assignments and preserved environments are not supported.
-
-Submit without waiting, check status, cancel: agsudo help --requester
-Review requests as a person: agsudo review --tui`
